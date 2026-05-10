@@ -67,7 +67,10 @@ import kotlinx.coroutines.launch
 fun PrivateVpnApp(
     appViewModel: AppViewModel = viewModel(),
     requestVpnPermissionOnStart: Boolean = false,
-    onRequestVpnPermissionConsumed: () -> Unit = {}
+    onRequestVpnPermissionConsumed: () -> Unit = {},
+    externalImportIntent: Intent? = null,
+    externalImportIntentVersion: Int = 0,
+    onExternalImportIntentConsumed: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
@@ -175,6 +178,13 @@ fun PrivateVpnApp(
             }
             onRequestVpnPermissionConsumed()
         }
+    }
+
+    LaunchedEffect(externalImportIntentVersion) {
+        val intent = externalImportIntent ?: return@LaunchedEffect
+        appViewModel.importExternalIntent(intent)
+        onExternalImportIntentConsumed()
+        navigateToTopLevel(AppDestination.Profiles)
     }
 
     Scaffold(

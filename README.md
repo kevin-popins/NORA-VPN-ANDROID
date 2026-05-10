@@ -1,6 +1,6 @@
 # NoraVPN
 
-Android VPN-клиент с поддержкой современных профилей и подписок: Xray/VLESS/REALITY и AmneziaWG 2.0.
+Android VPN-клиент с поддержкой современных профилей и подписок: Xray/VLESS/REALITY, HAPP-compatible подписки и AmneziaWG 2.0.
 
 ![Android](https://img.shields.io/badge/Android-26%2B-3DDC84?logo=android&logoColor=white)
 ![Kotlin](https://img.shields.io/badge/Kotlin-2.0-7F52FF?logo=kotlin&logoColor=white)
@@ -28,6 +28,7 @@ Android VPN-клиент с поддержкой современных проф
 - Подключение по `AmneziaWG 2.0`
 - Импорт профилей из ссылок и файлов
 - Импорт подписок по URL
+- Импорт внешних ссылок через Android `Открыть в...` / `Поделиться`
 - Обновление подписок вручную и автоматически
 - Выбор активного сервера/профиля
 - Раздельное туннелирование (только выбранные приложения идут через VPN)
@@ -35,7 +36,8 @@ Android VPN-клиент с поддержкой современных проф
 - Быстрый доступ к VPN через системную плитку Android (Quick Settings)
 - Foreground-уведомление с управлением подключением
 - Поддержка metadata подписок (трафик, срок действия, провайдерские поля)
-- Совместимость с провайдерскими подписками, где используются дополнительные служебные данные
+- Расшифровка HAPP `crypt5` подписок и профилей
+- Совместимость с HAPP/Marzban подписками, routing-профилями и провайдерскими конфигами
 
 ## Скриншоты
 ![Главный экран](docs/screenshots/main.jpg)
@@ -50,9 +52,16 @@ Android VPN-клиент с поддержкой современных проф
 - `vless://`
 - `vmess://`
 - `trojan://`
+- `happ://crypt5/...`
+- `happ://routing/add/...` и `happ://routing/onadd/...`
 - Raw `Xray JSON`
 - `AmneziaWG 2.0` (`.conf`)
 - Подписки по `URL`
+
+Для VLESS-ссылок поддерживается расширенная нормализация параметров провайдеров:
+- REALITY aliases: `pbk/publicKey/publickey/password`, `sid/shortId/shortid/short_id`, `sni/serverName/servername/server_name`, `fp/fingerprint`, `spx/spiderX/spiderx/spider_x`;
+- TLS/transport параметры: `alpn`, `allowInsecure`, `host/authority`, `path`, `serviceName`, `mode`, `headerType`;
+- транспорты: `tcp/raw`, `ws/websocket`, `grpc`, `h2/http`, `httpupgrade`, `splithttp`, `xhttp`.
 
 ## Как Начать
 1. Установите приложение.
@@ -70,6 +79,8 @@ Android VPN-клиент с поддержкой современных проф
 ## Подписки
 NoraVPN умеет загружать списки серверов из подписок провайдеров по URL.  
 Подписки можно обновлять, а дополнительные metadata/служебные поля провайдера используются для совместимости и отображения статуса.
+
+Если провайдер выдает HAPP `crypt5`, приложение расшифровывает ссылку перед добавлением. Если подписка содержит HAPP Routing в теле или HTTP-заголовке `routing`, правила `direct`, `proxy`, `block` и DNS из routing-профиля применяются к импортируемым Xray-профилям.
 
 ## Уведомления И Плитка В Шторке
 - Foreground notification показывает текущий статус VPN и даёт быстрые действия.

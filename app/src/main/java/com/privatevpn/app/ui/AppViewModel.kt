@@ -31,12 +31,16 @@ import com.privatevpn.app.private_session.SystemVpnIntegrationState
 import com.privatevpn.app.private_session.VpnSystemSettingsRepository
 import com.privatevpn.app.profiles.db.PrivateVpnDatabase
 import com.privatevpn.app.profiles.importer.ProfileImportParser
+import com.privatevpn.app.profiles.model.ImportedProfileDraft
 import com.privatevpn.app.profiles.model.ProfileType
 import com.privatevpn.app.profiles.model.SubscriptionSource
 import com.privatevpn.app.profiles.model.SubscriptionSyncStatus
 import com.privatevpn.app.profiles.model.VpnProfile
 import com.privatevpn.app.profiles.repository.RoomProfilesRepository
+import com.privatevpn.app.profiles.subscriptions.HappCrypt5Decryptor
+import com.privatevpn.app.profiles.subscriptions.HappRoutingCompat
 import com.privatevpn.app.profiles.subscriptions.RoomSubscriptionRepository
+import com.privatevpn.app.profiles.subscriptions.SubscriptionParser
 import com.privatevpn.app.profiles.subscriptions.SubscriptionRefreshResult
 import com.privatevpn.app.profiles.subscriptions.SubscriptionUpdateWorker
 import com.privatevpn.app.settings.DnsMode
@@ -88,6 +92,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val appIconRepository = AppIconRepository(application.applicationContext)
     private val vpnSystemSettingsRepository = VpnSystemSettingsRepository(application.applicationContext)
     private val profileImportParser = ProfileImportParser()
+    private val externalSubscriptionParser = SubscriptionParser(profileImportParser)
     private val vpnManager = VpnManager(VpnController(application.applicationContext))
 
     private val xrayBackendAdapter = XrayBackendAdapter(
@@ -629,70 +634,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val payload = profile.normalizedJson ?: profile.sourceRaw
         val state = extractProxyShortIdState(payload)
         if (!state.realityEnabled || !state.shortId.isNullOrBlank()) return profile
-
-        val subscriptionId = profile.parentSubscriptionId?.trim().orEmpty()
-        if (subscriptionId.isBlank()) {
-            addLog(
-                LogLevel.INFO,
-                "SHORTID TRACE recovery skipped profileId=${profile.id} reason=no-parent-subscription"
-            )
-            return profile
-        }
-
         addLog(
             LogLevel.INFO,
-            "SHORTID TRACE recovery start profileId=${profile.id} profile='${profile.displayName}' " +
-                "sourceShortId=${state.shortIdForLog()} parentSubscriptionId=$subscriptionId"
+            "SHORTID TRACE recovery skipped profileId=${profile.id} reason=empty-shortId-supported-by-runtime"
         )
-
-        val refreshResult = runCatching {
-            withContext(Dispatchers.IO) {
-                subscriptionRepository.refreshSubscription(subscriptionId = subscriptionId, force = true)
-            }
-        }.onFailure { error ->
-            addLog(
-                LogLevel.ERROR,
-                "SHORTID TRACE recovery refresh failed subscriptionId=$subscriptionId: ${error.message ?: "unknown"}"
-            )
-        }.getOrNull() ?: return profile
-
-        addLog(
-            LogLevel.INFO,
-            "SHORTID TRACE recovery refresh result subscriptionId=$subscriptionId status=${refreshResult.status} " +
-                "imported=${refreshResult.importedProfilesCount} invalid=${refreshResult.invalidEntriesCount} " +
-                "message='${refreshResult.message}'"
-        )
-
-        val latestBySubscription = profilesRepository.profiles.first()
-            .filter { it.parentSubscriptionId == subscriptionId }
-            .ifEmpty {
-                addLog(
-                    LogLevel.INFO,
-                    "SHORTID TRACE recovery no profiles after refresh subscriptionId=$subscriptionId"
-                )
-                return profile
-            }
-
-        val sameNameCandidates = latestBySubscription.filter {
-            it.displayName.trim() == profile.displayName.trim()
-        }
-        val selectionPool = if (sameNameCandidates.isNotEmpty()) sameNameCandidates else latestBySubscription
-        val recovered = selectionPool.maxByOrNull { candidate ->
-            val candidateState = extractProxyShortIdState(candidate.normalizedJson ?: candidate.sourceRaw)
-            if (!candidateState.shortId.isNullOrBlank()) 1 else 0
-        } ?: profile
-
-        val recoveredState = extractProxyShortIdState(recovered.normalizedJson ?: recovered.sourceRaw)
-        addLog(
-            LogLevel.INFO,
-            "SHORTID TRACE recovery selected profileId=${recovered.id} profile='${recovered.displayName}' " +
-                "type=${recovered.type.name} shortId=${recoveredState.shortIdForLog()} payload=${recoveredState.payloadKind}"
-        )
-
-        if (recovered.id != profile.id) {
-            userSettingsRepository.setActiveProfile(recovered.id)
-        }
-        return recovered
+        return profile
     }
 
     private suspend fun disconnectVpnInternal() {
@@ -746,22 +692,46 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun addSubscription(sourceUrl: String, displayName: String?) {
-        viewModelScope.launch(Dispatchers.IO) {
-            runCatching {
-                subscriptionRepository.addSubscription(sourceUrl = sourceUrl, displayName = displayName)
-            }.onSuccess { source ->
-                addLog(LogLevel.INFO, "Подписка '${source.displayName}' добавлена")
-                emitTransientMessage("Подписка '${source.displayName}' добавлена")
-                refreshSubscription(source.id, showSuccessMessage = false)
-                SubscriptionUpdateWorker.schedule(getApplication<Application>().applicationContext)
-            }.onFailure { error ->
+    fun importExternalIntent(intent: Intent) {
+        viewModelScope.launch {
+            val payloads = withContext(Dispatchers.IO) {
+                extractExternalImportPayloads(intent)
+            }
+            if (payloads.isEmpty()) {
                 applyUiError(
-                    AppErrors.subscriptionAddFailed(
-                        technicalReason = error.message
+                    AppErrors.profileImportFailed(
+                        technicalReason = "external intent does not contain readable text or uri"
                     )
                 )
+                return@launch
             }
+
+            payloads.forEach { payload ->
+                importExternalPayload(rawInput = payload.text, sourceLabel = payload.sourceLabel)
+            }
+        }
+    }
+
+    fun addSubscription(sourceUrl: String, displayName: String?) {
+        viewModelScope.launch(Dispatchers.IO) {
+            addSubscriptionInternal(sourceUrl = sourceUrl, displayName = displayName)
+        }
+    }
+
+    private suspend fun addSubscriptionInternal(sourceUrl: String, displayName: String?) {
+        runCatching {
+            subscriptionRepository.addSubscription(sourceUrl = sourceUrl, displayName = displayName)
+        }.onSuccess { source ->
+            addLog(LogLevel.INFO, "Подписка '${source.displayName}' добавлена")
+            emitTransientMessage("Подписка '${source.displayName}' добавлена")
+            refreshSubscription(source.id, showSuccessMessage = false)
+            SubscriptionUpdateWorker.schedule(getApplication<Application>().applicationContext)
+        }.onFailure { error ->
+            applyUiError(
+                AppErrors.subscriptionAddFailed(
+                    technicalReason = error.message
+                )
+            )
         }
     }
 
@@ -1681,39 +1651,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun importProfileInternal(rawInput: String, sourceLabel: String) {
         runCatching {
             val parsed = profileImportParser.parse(rawInput)
-            val profile = VpnProfile(
-                id = UUID.randomUUID().toString(),
-                displayName = parsed.displayName,
-                type = parsed.type,
-                sourceRaw = parsed.sourceRaw,
-                normalizedJson = parsed.normalizedJson,
-                dnsServers = parsed.dnsServers,
-                dnsFallbackApplied = parsed.dnsFallbackApplied,
-                isPartialImport = parsed.isPartialImport,
-                importWarnings = parsed.importWarnings,
-                importedAtMs = System.currentTimeMillis()
-            )
-            profilesRepository.addProfile(profile)
-            profile
+            persistImportedDraft(parsed)
         }.onSuccess { imported ->
-            val settingsSnapshot = uiState.value.settingsState
-            if (settingsSnapshot.activeProfileId == null) {
-                userSettingsRepository.setActiveProfile(imported.id)
-                vpnManager.updateActiveProfileName(imported.displayName)
-                VpnRuntimeStateStore.setLastSelectedProfileName(imported.displayName)
-            }
-
-            addLog(LogLevel.INFO, "Профиль '${imported.displayName}' импортирован ($sourceLabel)")
-            if (imported.dnsFallbackApplied) {
-                addLog(LogLevel.INFO, "Для профиля '${imported.displayName}' подставлен DNS по умолчанию")
-            }
-            if (imported.isPartialImport) {
-                addLog(LogLevel.INFO, "Профиль '${imported.displayName}' импортирован частично")
-                imported.importWarnings.forEach { warning -> addLog(LogLevel.INFO, warning) }
-                emitTransientMessage("Профиль '${imported.displayName}' добавлен частично")
-            } else {
-                emitTransientMessage("Профиль '${imported.displayName}' успешно добавлен")
-            }
+            handleImportedProfileSuccess(imported = imported, sourceLabel = sourceLabel)
         }.onFailure { error ->
             val isUnsupportedFormat = error.message
                 ?.contains("Неподдерживаемый формат профиля", ignoreCase = true) == true
@@ -1726,6 +1666,199 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     fallbackCode = AppErrorCode.IMPORT_001
                 )
             }
+        }
+    }
+
+    private suspend fun importExternalPayload(rawInput: String, sourceLabel: String) {
+        val candidate = extractExternalImportCandidate(rawInput)
+        if (candidate.isBlank()) {
+            applyUiError(AppErrors.profileUnsupported("В переданных данных не найден профиль или URL подписки"))
+            return
+        }
+
+        if (isHappEncryptedLink(candidate)) {
+            val decrypted = runCatching {
+                HappCrypt5Decryptor.decryptToText(candidate)
+            }.getOrElse { error ->
+                handleError(
+                    userMessage = "Не удалось расшифровать HAPP-ссылку",
+                    error = error,
+                    fallbackCode = AppErrorCode.IMPORT_001
+                )
+                return
+            }
+            addLog(LogLevel.INFO, "HAPP crypt5 ссылка расшифрована")
+            if (isHttpSubscriptionUrl(decrypted)) {
+                addSubscriptionInternal(sourceUrl = decrypted, displayName = null)
+            } else {
+                importExternalPayload(rawInput = decrypted, sourceLabel = "$sourceLabel/HAPP")
+            }
+            return
+        }
+
+        if (isHttpSubscriptionUrl(candidate)) {
+            addSubscriptionInternal(sourceUrl = candidate, displayName = null)
+            return
+        }
+
+        val parsedSubscription = externalSubscriptionParser.parse(rawInput)
+        if (parsedSubscription.validProfiles.isNotEmpty() &&
+            (parsedSubscription.validProfiles.size > 1 || parsedSubscription.happRoutingProfile != null)
+        ) {
+            val routingProfile = parsedSubscription.happRoutingProfile
+            val imported = parsedSubscription.validProfiles.map { draft ->
+                val routedDraft = routingProfile?.let { HappRoutingCompat.applyRoutingToDraft(draft, it) } ?: draft
+                persistImportedDraft(routedDraft)
+            }
+            imported.forEach { profile -> handleImportedProfileSuccess(imported = profile, sourceLabel = sourceLabel) }
+            emitTransientMessage("Импортировано профилей: ${imported.size}")
+            return
+        }
+
+        if (HappRoutingCompat.isRoutingLink(candidate)) {
+            val routingProfile = HappRoutingCompat.findFirstRoutingProfile(candidate)
+            val routeName = routingProfile?.name?.takeIf { it.isNotBlank() } ?: "HAPP"
+            addLog(LogLevel.INFO, "HAPP Routing '$routeName' получен отдельно; будет применён при импорте подписки/профиля с routing в одном payload")
+            emitTransientMessage("HAPP Routing получен. Откройте ссылку профиля или подписки вместе с routing.")
+            return
+        }
+
+        importProfileInternal(rawInput = candidate, sourceLabel = sourceLabel)
+    }
+
+    private suspend fun persistImportedDraft(parsed: ImportedProfileDraft): VpnProfile {
+        val profile = VpnProfile(
+            id = UUID.randomUUID().toString(),
+            displayName = parsed.displayName,
+            type = parsed.type,
+            sourceRaw = parsed.sourceRaw,
+            normalizedJson = parsed.normalizedJson,
+            dnsServers = parsed.dnsServers,
+            dnsFallbackApplied = parsed.dnsFallbackApplied,
+            isPartialImport = parsed.isPartialImport,
+            importWarnings = parsed.importWarnings,
+            importedAtMs = System.currentTimeMillis()
+        )
+        profilesRepository.addProfile(profile)
+        return profile
+    }
+
+    private suspend fun handleImportedProfileSuccess(imported: VpnProfile, sourceLabel: String) {
+        val settingsSnapshot = uiState.value.settingsState
+        if (settingsSnapshot.activeProfileId == null) {
+            userSettingsRepository.setActiveProfile(imported.id)
+            vpnManager.updateActiveProfileName(imported.displayName)
+            VpnRuntimeStateStore.setLastSelectedProfileName(imported.displayName)
+        }
+
+        addLog(LogLevel.INFO, "Профиль '${imported.displayName}' импортирован ($sourceLabel)")
+        if (imported.dnsFallbackApplied) {
+            addLog(LogLevel.INFO, "Для профиля '${imported.displayName}' подставлен DNS по умолчанию")
+        }
+        if (imported.isPartialImport) {
+            addLog(LogLevel.INFO, "Профиль '${imported.displayName}' импортирован частично")
+            imported.importWarnings.forEach { warning -> addLog(LogLevel.INFO, warning) }
+            emitTransientMessage("Профиль '${imported.displayName}' добавлен частично")
+        } else {
+            emitTransientMessage("Профиль '${imported.displayName}' успешно добавлен")
+        }
+    }
+
+    private fun extractExternalImportPayloads(intent: Intent): List<ExternalImportPayload> {
+        val payloads = mutableListOf<ExternalImportPayload>()
+
+        fun addText(value: CharSequence?, label: String) {
+            value?.toString()?.trim()?.takeIf { it.isNotBlank() }?.let { text ->
+                payloads += ExternalImportPayload(text = text, sourceLabel = label)
+            }
+        }
+
+        fun addUri(uri: Uri?, label: String) {
+            uri ?: return
+            val scheme = uri.scheme?.lowercase().orEmpty()
+            if (scheme == "content" || scheme == "file") {
+                readTextFromUri(uri)?.let { text ->
+                    payloads += ExternalImportPayload(text = text, sourceLabel = label)
+                }
+            } else {
+                uri.toString().takeIf { it.isNotBlank() }?.let { text ->
+                    payloads += ExternalImportPayload(text = text, sourceLabel = label)
+                }
+            }
+        }
+
+        when (intent.action) {
+            Intent.ACTION_VIEW,
+            Intent.ACTION_EDIT -> addUri(intent.data, "внешняя ссылка")
+
+            Intent.ACTION_SEND -> {
+                addText(intent.getCharSequenceExtra(Intent.EXTRA_TEXT), "поделиться")
+                addUri(intent.streamUriExtra(), "поделиться файлом")
+            }
+
+            Intent.ACTION_SEND_MULTIPLE -> {
+                addText(intent.getCharSequenceExtra(Intent.EXTRA_TEXT), "поделиться")
+                intent.streamUriListExtra().forEach { uri -> addUri(uri, "поделиться файлами") }
+            }
+        }
+
+        val clipData = intent.clipData
+        if (clipData != null) {
+            for (index in 0 until clipData.itemCount) {
+                val item = clipData.getItemAt(index)
+                addText(item.text, "clipboard")
+                addUri(item.uri, "clipboard")
+            }
+        }
+
+        return payloads.distinctBy { it.text }
+    }
+
+    private fun readTextFromUri(uri: Uri): String? {
+        val resolver = getApplication<Application>().contentResolver
+        return runCatching {
+            resolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+        }.getOrNull()?.trim()?.takeIf { it.isNotBlank() }
+    }
+
+    private fun extractExternalImportCandidate(rawInput: String): String {
+        val trimmed = rawInput.trim()
+        if (trimmed.isBlank()) return ""
+        if (trimmed.startsWith("{") || looksLikeAwgPayload(trimmed)) return trimmed
+        if (SUPPORTED_EXTERNAL_PREFIXES.any { trimmed.startsWith(it, ignoreCase = true) }) return trimmed
+        return EXTERNAL_LINK_REGEX.find(trimmed)
+            ?.value
+            ?.trimEnd(',', ';', ')', ']', '}', '"', '\'')
+            .orEmpty()
+    }
+
+    private fun isHappEncryptedLink(value: String): Boolean {
+        return HappCrypt5Decryptor.isCrypt5Link(value)
+    }
+
+    private fun isHttpSubscriptionUrl(value: String): Boolean {
+        return value.startsWith("http://", ignoreCase = true) || value.startsWith("https://", ignoreCase = true)
+    }
+
+    private fun looksLikeAwgPayload(value: String): Boolean {
+        return value.contains("[Interface]", ignoreCase = true) && value.contains("[Peer]", ignoreCase = true)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun Intent.streamUriExtra(): Uri? {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+        } else {
+            getParcelableExtra(Intent.EXTRA_STREAM) as? Uri
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun Intent.streamUriListExtra(): List<Uri> {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java).orEmpty()
+        } else {
+            getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM).orEmpty()
         }
     }
 
@@ -1806,9 +1939,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             val streamSettings = selected.optJSONObject("streamSettings")
             val security = streamSettings?.optString("security")?.trim()?.lowercase().orEmpty()
             val realitySettings = streamSettings?.optJSONObject("realitySettings")
-            val shortId = realitySettings?.optString("shortId")?.trim()
-                ?.takeIf { it.isNotBlank() }
+            val shortId = realitySettings?.firstNonBlankString("shortId", "shortid", "sid", "short_id")
                 ?: realitySettings?.optJSONArray("shortIds")
+                    ?.let { shortIds ->
+                        (0 until shortIds.length())
+                            .asSequence()
+                            .map { shortIds.optString(it).trim() }
+                            .firstOrNull { it.isNotBlank() }
+                    }
+                ?: realitySettings?.optJSONArray("shortids")
                     ?.let { shortIds ->
                         (0 until shortIds.length())
                             .asSequence()
@@ -1824,10 +1963,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
         if (text.startsWith("vless://", ignoreCase = true)) {
             val uri = runCatching { Uri.parse(text) }.getOrNull()
-            val security = uri?.getQueryParameter("security")?.trim()?.lowercase()
-            val shortId = uri?.getQueryParameter("shortId")
-                ?.takeIf { it.isNotBlank() }
-                ?: uri?.getQueryParameter("sid")?.takeIf { it.isNotBlank() }
+            val security = uri?.queryParameterValue("security")?.trim()?.lowercase()
+            val shortId = uri?.queryParameterValue("shortId", "shortid", "sid", "short_id")
             return ProxyShortIdState(
                 payloadKind = "vless-uri",
                 realityEnabled = security == "reality",
@@ -1836,6 +1973,26 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         return ProxyShortIdState(payloadKind = "unsupported")
+    }
+
+    private fun Uri.queryParameterValue(vararg names: String): String? {
+        names.forEach { name ->
+            getQueryParameter(name)?.takeIf { it.isNotBlank() }?.let { return it }
+        }
+
+        val nameSet = names.map { it.lowercase() }.toSet()
+        return queryParameterNames
+            .firstOrNull { candidate -> candidate.lowercase() in nameSet }
+            ?.let { candidate -> getQueryParameter(candidate) }
+            ?.takeIf { it.isNotBlank() }
+    }
+
+    private fun JSONObject.firstNonBlankString(vararg keys: String): String? {
+        keys.forEach { key ->
+            val value = optString(key).trim()
+            if (value.isNotBlank()) return value
+        }
+        return null
     }
 
     private data class ProxyShortIdState(
@@ -1849,6 +2006,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             return "present($value)"
         }
     }
+
+    private data class ExternalImportPayload(
+        val text: String,
+        val sourceLabel: String
+    )
 
     private data class ProfileEndpoint(
         val host: String,
@@ -2028,6 +2190,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         const val BACKEND_SWITCH_RETRY_DELAY_MS = 300L
         const val BACKEND_SWITCH_POLL_DELAY_MS = 75L
         const val BACKEND_SWITCH_PROGRESS_LOG_INTERVAL_MS = 500L
+        val SUPPORTED_EXTERNAL_PREFIXES = listOf(
+            "vless://",
+            "vmess://",
+            "trojan://",
+            "happ://",
+            "http://",
+            "https://"
+        )
+        val EXTERNAL_LINK_REGEX = Regex(
+            pattern = "\\b(?:vless|vmess|trojan|happ|https?)://\\S+",
+            options = setOf(RegexOption.IGNORE_CASE)
+        )
         val BACKEND_WARMUP_ERROR_MARKERS = listOf(
             "unknown error",
             "неизвест",

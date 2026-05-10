@@ -5,6 +5,7 @@ import com.privatevpn.app.core.dns.DefaultDnsProvider
 import com.privatevpn.app.profiles.awg.AmneziaWgConfigParser
 import com.privatevpn.app.profiles.model.ImportedProfileDraft
 import com.privatevpn.app.profiles.model.ProfileType
+import com.privatevpn.app.profiles.subscriptions.HappCrypt5Decryptor
 import org.json.JSONArray
 import org.json.JSONObject
 import java.nio.charset.StandardCharsets
@@ -18,6 +19,7 @@ class ProfileImportParser {
         require(input.isNotBlank()) { "Пустой профиль." }
 
         return when {
+            HappCrypt5Decryptor.isCrypt5Link(input) -> parse(HappCrypt5Decryptor.decryptToText(input))
             input.startsWith(VLESS_PREFIX, ignoreCase = true) -> parseVless(input)
             input.startsWith(TROJAN_PREFIX, ignoreCase = true) -> parseUriProfile(input, ProfileType.TROJAN)
             input.startsWith(VMESS_PREFIX, ignoreCase = true) -> parseVmess(input)
@@ -40,30 +42,26 @@ class ProfileImportParser {
             val displayName = uri.fragment?.takeIf { it.isNotBlank() }
                 ?: "$address:$port"
 
-            val transport = uri.getQueryParameter("type")?.takeIf { it.isNotBlank() } ?: "tcp"
-            val flow = uri.getQueryParameter("flow")?.takeIf { it.isNotBlank() }
-            val security = uri.getQueryParameter("security")?.lowercase() ?: "none"
-            val publicKey = uri.getQueryParameter("pbk")
-                ?: uri.getQueryParameter("publicKey")
-                ?: uri.getQueryParameter("password")
-            val shortId = uri.getQueryParameter("sid")
-                ?: uri.getQueryParameter("shortId")
-            val serverName = uri.getQueryParameter("sni")
-                ?: uri.getQueryParameter("serverName")
-            val fingerprint = uri.getQueryParameter("fp")
-                ?: uri.getQueryParameter("fingerprint")
-            val spiderX = uri.getQueryParameter("spx")
-                ?: uri.getQueryParameter("spiderX")
-            val hasSpiderX = uri.queryParameterNames.contains("spx") || uri.queryParameterNames.contains("spiderX")
+            val transport = uri.queryParameterValue("type")?.takeIf { it.isNotBlank() } ?: "tcp"
+            val flow = uri.queryParameterValue("flow")?.takeIf { it.isNotBlank() }
+            val security = uri.queryParameterValue("security")?.lowercase() ?: "none"
+            val publicKey = uri.queryParameterValue("pbk", "publicKey", "publickey", "password")
+            val shortId = uri.queryParameterValue("sid", "shortId", "shortid", "short_id")
+            val serverName = uri.queryParameterValue("sni", "serverName", "servername", "server_name")
+            val fingerprint = uri.queryParameterValue("fp", "fingerprint")
+            val spiderX = uri.queryParameterValue("spx", "spiderX", "spiderx", "spider_x")
+            val path = uri.queryParameterValue("path")
+            val host = uri.queryParameterValue("host", "authority")
+            val alpn = uri.queryParameterValue("alpn")
+            val serviceName = uri.queryParameterValue("serviceName", "servicename", "service_name", "service")
+            val mode = uri.queryParameterValue("mode")
+            val headerType = uri.queryParameterValue("headerType", "headertype", "header_type")
+            val allowInsecure = uri.queryParameterValue("allowInsecure", "allowinsecure")
 
             val warnings = mutableListOf<String>()
             if (security == "reality") {
                 if (publicKey.isNullOrBlank()) warnings += "VLESS REALITY: отсутствует publicKey/pbk"
-                if (serverName.isNullOrBlank()) warnings += "VLESS REALITY: отсутствует serverName/sni"
-                if (fingerprint.isNullOrBlank()) warnings += "VLESS REALITY: отсутствует fingerprint/fp"
-                if (shortId.isNullOrBlank()) warnings += "VLESS REALITY: отсутствует shortId/sid"
-                if (!hasSpiderX) warnings += "VLESS REALITY: отсутствует spiderX/spx"
-                if (flow.isNullOrBlank()) warnings += "VLESS REALITY: отсутствует flow (например xtls-rprx-vision)"
+                if (serverName.isNullOrBlank()) warnings += "VLESS REALITY: отсутствует serverName/sni, будет использован address"
             }
 
             val normalizedJson = buildVlessConfig(
@@ -77,7 +75,14 @@ class ProfileImportParser {
                 shortId = shortId,
                 serverName = serverName,
                 fingerprint = fingerprint,
-                spiderX = spiderX
+                spiderX = spiderX,
+                path = path,
+                host = host,
+                alpn = alpn,
+                serviceName = serviceName,
+                mode = mode,
+                headerType = headerType,
+                allowInsecure = allowInsecure
             )
 
             ImportedProfileDraft(
@@ -247,7 +252,14 @@ class ProfileImportParser {
         shortId: String?,
         serverName: String?,
         fingerprint: String?,
-        spiderX: String?
+        spiderX: String?,
+        path: String?,
+        host: String?,
+        alpn: String?,
+        serviceName: String?,
+        mode: String?,
+        headerType: String?,
+        allowInsecure: String?
     ): String {
         val user = JSONObject()
             .put("id", uuid)
@@ -271,12 +283,36 @@ class ProfileImportParser {
                 realitySettings.put("publicKey", publicKey)
                 realitySettings.put("password", publicKey)
             }
-            if (!shortId.isNullOrBlank()) realitySettings.put("shortId", shortId)
-            if (!serverName.isNullOrBlank()) realitySettings.put("serverName", serverName)
+            if (!shortId.isNullOrBlank()) {
+                realitySettings.put("shortId", shortId)
+            } else {
+                realitySettings.put("shortId", "")
+            }
+            realitySettings.put("serverName", serverName?.takeIf { it.isNotBlank() } ?: address)
             if (!fingerprint.isNullOrBlank()) realitySettings.put("fingerprint", fingerprint)
             if (spiderX != null) realitySettings.put("spiderX", spiderX)
             streamSettings.put("realitySettings", realitySettings)
         }
+        if (security == "tls") {
+            val tlsSettings = JSONObject()
+            tlsSettings.put("serverName", serverName?.takeIf { it.isNotBlank() } ?: address)
+            if (!fingerprint.isNullOrBlank()) tlsSettings.put("fingerprint", fingerprint)
+            parseCsv(alpn).takeIf { it.isNotEmpty() }?.let { tlsSettings.put("alpn", JSONArray(it)) }
+            if (allowInsecure?.equals("true", ignoreCase = true) == true || allowInsecure == "1") {
+                tlsSettings.put("allowInsecure", true)
+            }
+            streamSettings.put("tlsSettings", tlsSettings)
+        }
+
+        applyTransportSettings(
+            streamSettings = streamSettings,
+            transport = transport,
+            path = path,
+            host = host,
+            serviceName = serviceName,
+            mode = mode,
+            headerType = headerType
+        )
 
         val outboundProxy = JSONObject()
             .put("tag", "proxy")
@@ -300,6 +336,85 @@ class ProfileImportParser {
             .put("outbounds", JSONArray().put(outboundProxy).put(outboundDirect).put(outboundBlock))
             .put("routing", JSONObject().put("domainStrategy", "AsIs"))
             .toString(2)
+    }
+
+    private fun applyTransportSettings(
+        streamSettings: JSONObject,
+        transport: String,
+        path: String?,
+        host: String?,
+        serviceName: String?,
+        mode: String?,
+        headerType: String?
+    ) {
+        when (transport.lowercase()) {
+            "ws", "websocket" -> {
+                streamSettings.put("network", "ws")
+                val wsSettings = JSONObject()
+                if (!path.isNullOrBlank()) wsSettings.put("path", path)
+                if (!host.isNullOrBlank()) wsSettings.put("headers", JSONObject().put("Host", host))
+                streamSettings.put("wsSettings", wsSettings)
+            }
+
+            "grpc" -> {
+                val grpcSettings = JSONObject()
+                if (!serviceName.isNullOrBlank()) grpcSettings.put("serviceName", serviceName)
+                if (!host.isNullOrBlank()) grpcSettings.put("authority", host)
+                if (mode.equals("multi", ignoreCase = true) || mode.equals("multiMode", ignoreCase = true)) {
+                    grpcSettings.put("multiMode", true)
+                }
+                streamSettings.put("grpcSettings", grpcSettings)
+            }
+
+            "h2", "http" -> {
+                streamSettings.put("network", "h2")
+                val httpSettings = JSONObject()
+                if (!path.isNullOrBlank()) httpSettings.put("path", path)
+                parseCsv(host).takeIf { it.isNotEmpty() }?.let { httpSettings.put("host", JSONArray(it)) }
+                streamSettings.put("httpSettings", httpSettings)
+            }
+
+            "httpupgrade" -> {
+                val httpUpgradeSettings = JSONObject()
+                if (!path.isNullOrBlank()) httpUpgradeSettings.put("path", path)
+                if (!host.isNullOrBlank()) httpUpgradeSettings.put("host", host)
+                streamSettings.put("httpupgradeSettings", httpUpgradeSettings)
+            }
+
+            "splithttp" -> {
+                val splitHttpSettings = JSONObject()
+                if (!path.isNullOrBlank()) splitHttpSettings.put("path", path)
+                if (!host.isNullOrBlank()) splitHttpSettings.put("host", host)
+                streamSettings.put("splithttpSettings", splitHttpSettings)
+            }
+
+            "xhttp" -> {
+                val xhttpSettings = JSONObject()
+                if (!path.isNullOrBlank()) xhttpSettings.put("path", path)
+                if (!host.isNullOrBlank()) xhttpSettings.put("host", host)
+                mode?.takeIf { it.isNotBlank() }?.let { xhttpSettings.put("mode", it) }
+                streamSettings.put("xhttpSettings", xhttpSettings)
+            }
+
+            "tcp", "raw" -> {
+                if (!headerType.isNullOrBlank() && !headerType.equals("none", ignoreCase = true)) {
+                    val header = JSONObject().put("type", headerType)
+                    if (!host.isNullOrBlank()) {
+                        val request = JSONObject().put("headers", JSONObject().put("Host", JSONArray(parseCsv(host))))
+                        header.put("request", request)
+                    }
+                    streamSettings.put("tcpSettings", JSONObject().put("header", header))
+                }
+            }
+        }
+    }
+
+    private fun parseCsv(value: String?): List<String> {
+        return value
+            ?.split(',')
+            ?.map { it.trim() }
+            ?.filter { it.isNotBlank() }
+            .orEmpty()
     }
 
     private fun extractDnsServers(json: JSONObject): List<String> {
@@ -359,6 +474,18 @@ class ProfileImportParser {
 
     private fun normalize(input: String): String {
         return input.removePrefix("\uFEFF")
+    }
+
+    private fun Uri.queryParameterValue(vararg names: String): String? {
+        names.forEach { name ->
+            getQueryParameter(name)?.takeIf { it.isNotBlank() }?.let { return it }
+        }
+
+        val nameSet = names.map { it.lowercase() }.toSet()
+        return queryParameterNames
+            .firstOrNull { candidate -> candidate.lowercase() in nameSet }
+            ?.let { candidate -> getQueryParameter(candidate) }
+            ?.takeIf { it.isNotBlank() }
     }
 
     private fun detectJsonProfileType(json: JSONObject): ProfileType {

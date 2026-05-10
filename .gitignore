@@ -11,6 +11,7 @@ app/release/
 *.dm
 output-metadata.json
 tmp_*.txt
+.tmp_*.txt
 
 # IDE
 .idea/

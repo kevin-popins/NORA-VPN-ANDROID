@@ -48,4 +48,5 @@ class ProfileImportParserTest {
         assertTrue(parsed.normalizedJson?.contains("S4 = 2") == true)
         assertTrue(parsed.importWarnings.any { it.contains("I2", ignoreCase = true) })
     }
+
 }

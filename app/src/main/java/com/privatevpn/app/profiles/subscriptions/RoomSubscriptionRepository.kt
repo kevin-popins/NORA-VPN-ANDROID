@@ -48,7 +48,7 @@ class RoomSubscriptionRepository(
         subscriptionSourceDao.observeAll().map { entities -> entities.map { it.toDomain() } }
 
     override suspend fun addSubscription(sourceUrl: String, displayName: String?): SubscriptionSource {
-        val normalizedUrl = sourceUrl.trim()
+        val normalizedUrl = HappCrypt5Decryptor.decryptIfNeeded(sourceUrl)
         require(normalizedUrl.startsWith("http://") || normalizedUrl.startsWith("https://")) {
             "URL подписки должен начинаться с http:// или https://"
         }
@@ -359,6 +359,7 @@ class RoomSubscriptionRepository(
             var parsedData = parseSubscriptionPayload(
                 subscription = source,
                 body = body,
+                headers = response.headers,
                 importedAt = startedAt
             )
             logShortIdTraceStage1And2(
@@ -458,6 +459,7 @@ class RoomSubscriptionRepository(
                     val retryParsed = parseSubscriptionPayload(
                         subscription = source,
                         body = retryResponse.body.orEmpty(),
+                        headers = retryResponse.headers,
                         importedAt = startedAt
                     )
                     val retryQuality = buildParsedDataQuality(retryParsed)
@@ -910,15 +912,26 @@ class RoomSubscriptionRepository(
     private fun parseSubscriptionPayload(
         subscription: SubscriptionSource,
         body: String,
+        headers: Map<String, String>,
         importedAt: Long
     ): ParsedSubscriptionData {
-        val parseResult = parser.parse(body)
+        val bodyWithRoutingHeader = headerValue(headers, HAPP_ROUTING_HEADER)
+            ?.takeIf { it.startsWith("happ://routing/", ignoreCase = true) }
+            ?.let { routingLink -> "$routingLink\n$body" }
+            ?: body
+        val parseResult = parser.parse(bodyWithRoutingHeader)
         val builtProfiles = buildChildProfiles(
             subscription = subscription,
             parseResult = parseResult,
             importedAt = importedAt
         )
-        val allProfiles = builtProfiles.profiles
+        val allProfiles = parseResult.happRoutingProfile
+            ?.let { routingProfile ->
+                builtProfiles.profiles.map { profile ->
+                    applyHappRoutingToProfile(profile = profile, routingProfile = routingProfile)
+                }
+            }
+            ?: builtProfiles.profiles
         val (markerProfiles, connectableProfiles) = allProfiles.partition { isServiceMarkerProfile(it) }
         val markerMetadata = extractMarkerMetadata(markerProfiles)
 
@@ -931,6 +944,30 @@ class RoomSubscriptionRepository(
             compatibilityMode = markerMetadata.compatibilityMode,
             providerSite = markerMetadata.providerSite,
             platformHints = markerMetadata.platformHints
+        )
+    }
+
+    private fun applyHappRoutingToProfile(
+        profile: VpnProfile,
+        routingProfile: HappRoutingProfile
+    ): VpnProfile {
+        val draft = ImportedProfileDraft(
+            displayName = profile.displayName,
+            type = profile.type,
+            sourceRaw = profile.sourceRaw,
+            normalizedJson = profile.normalizedJson,
+            dnsServers = profile.dnsServers,
+            dnsFallbackApplied = profile.dnsFallbackApplied,
+            isPartialImport = profile.isPartialImport,
+            importWarnings = profile.importWarnings
+        )
+        val routed = HappRoutingCompat.applyRoutingToDraft(draft, routingProfile)
+        return profile.copy(
+            normalizedJson = routed.normalizedJson,
+            dnsServers = routed.dnsServers,
+            dnsFallbackApplied = routed.dnsFallbackApplied,
+            isPartialImport = routed.isPartialImport,
+            importWarnings = routed.importWarnings
         )
     }
 
@@ -1042,10 +1079,8 @@ class RoomSubscriptionRepository(
 
         if (text.startsWith("vless://", ignoreCase = true)) {
             val uri = runCatching { Uri.parse(text) }.getOrNull()
-            val security = uri?.getQueryParameter("security")?.trim()?.lowercase(Locale.US)
-            val shortId = uri?.getQueryParameter("shortId")
-                ?.takeIf { it.isNotBlank() }
-                ?: uri?.getQueryParameter("sid")?.takeIf { it.isNotBlank() }
+            val security = uri?.queryParameterValue("security")?.trim()?.lowercase(Locale.US)
+            val shortId = uri?.queryParameterValue("shortId", "shortid", "sid", "short_id")
             return ProxyShortIdState(
                 payloadKind = "vless-uri",
                 realityEnabled = security == "reality",
@@ -1073,8 +1108,15 @@ class RoomSubscriptionRepository(
         val streamSettings = matchedOutbound.optJSONObject("streamSettings")
         val security = streamSettings?.optString("security")?.trim()?.lowercase(Locale.US).orEmpty()
         val realitySettings = streamSettings?.optJSONObject("realitySettings")
-        val shortId = realitySettings?.optString("shortId")?.trim()?.takeIf { it.isNotBlank() }
+        val shortId = realitySettings?.firstNonBlankString("shortId", "shortid", "sid", "short_id")
             ?: realitySettings?.optJSONArray("shortIds")
+                ?.let { shortIds ->
+                    (0 until shortIds.length())
+                        .asSequence()
+                        .map { shortIds.optString(it).trim() }
+                        .firstOrNull { it.isNotBlank() }
+                }
+            ?: realitySettings?.optJSONArray("shortids")
                 ?.let { shortIds ->
                     (0 until shortIds.length())
                         .asSequence()
@@ -1107,6 +1149,26 @@ class RoomSubscriptionRepository(
             }
         }
         return outbounds.optJSONObject(0)
+    }
+
+    private fun Uri.queryParameterValue(vararg names: String): String? {
+        names.forEach { name ->
+            getQueryParameter(name)?.takeIf { it.isNotBlank() }?.let { return it }
+        }
+
+        val nameSet = names.map { it.lowercase(Locale.US) }.toSet()
+        return queryParameterNames
+            .firstOrNull { candidate -> candidate.lowercase(Locale.US) in nameSet }
+            ?.let { candidate -> getQueryParameter(candidate) }
+            ?.takeIf { it.isNotBlank() }
+    }
+
+    private fun JSONObject.firstNonBlankString(vararg keys: String): String? {
+        keys.forEach { key ->
+            val value = optString(key).trim()
+            if (value.isNotBlank()) return value
+        }
+        return null
     }
 
     private fun shouldDumpTracePayload(profileName: String, index: Int): Boolean {
@@ -1408,9 +1470,7 @@ class RoomSubscriptionRepository(
             .take(220)
 
         val compatibilityMode = when {
-            hwidActive && hwidNotSupported ->
-                COMPAT_MODE_PROVIDER_MARKER
-
+            hwidNotSupported -> COMPAT_MODE_PROVIDER_MARKER
             else -> null
         }
 
@@ -1575,7 +1635,7 @@ class RoomSubscriptionRepository(
             ?.equals("true", ignoreCase = true) == true
         val markerOnly = parsedData.markerEntriesCount > 0
 
-        return (hwidActive && hwidNotSupported) || (hwidActive && markerOnly)
+        return hwidNotSupported || (hwidActive && markerOnly)
     }
 
     private fun resolveCompatibilityHwid(): String? {
@@ -1912,6 +1972,27 @@ class RoomSubscriptionRepository(
                             }
                         }.getOrNull()
                         val errorText = errorBytes?.let { decodeBody(it, connection.contentType) }.orEmpty()
+                        val hwidNotSupported = headerValue(headers, HWID_NOT_SUPPORTED_HEADER)
+                            ?.equals("true", ignoreCase = true) == true
+                        val hwidActive = headerValue(headers, HWID_ACTIVE_HEADER)
+                            ?.equals("true", ignoreCase = true) == true
+                        val hwidLimit = headerValue(headers, HWID_LIMIT_HEADER)
+                            ?.equals("true", ignoreCase = true) == true
+                        val isCompatibilityGate = hwidNotSupported || (hwidActive && hwidLimit)
+                        if (isCompatibilityGate) {
+                            return@withContext SubscriptionHttpResponse(
+                                statusCode = statusCode,
+                                body = errorText,
+                                bodyLength = errorBytes?.size ?: 0,
+                                contentType = connection.contentType,
+                                headers = headers,
+                                headersSummary = headersSummary,
+                                bodyPreview = buildSafePreview(errorText),
+                                etag = connection.getHeaderField("ETag"),
+                                lastModified = connection.getHeaderField("Last-Modified"),
+                                notModified = false
+                            )
+                        }
                         throw IllegalStateException(
                             "HTTP $statusCode при обновлении подписки. ${errorText.take(200)}"
                         )
@@ -1955,7 +2036,7 @@ class RoomSubscriptionRepository(
             "Profile-Web-Page-Url",
             "Support-Url",
             HWID_ACTIVE_HEADER,
-            "X-Hwid-Limit",
+            HWID_LIMIT_HEADER,
             HWID_NOT_SUPPORTED_HEADER
         )
         return interestingKeys.mapNotNull { key ->
@@ -2145,7 +2226,9 @@ class RoomSubscriptionRepository(
         private const val DEVICE_MODEL_HEADER: String = "device-model"
         private const val X_DEVICE_MODEL_HEADER: String = "x-device-model"
         private const val HWID_ACTIVE_HEADER: String = "X-Hwid-Active"
+        private const val HWID_LIMIT_HEADER: String = "X-Hwid-Limit"
         private const val HWID_NOT_SUPPORTED_HEADER: String = "X-Hwid-Not-Supported"
+        private const val HAPP_ROUTING_HEADER: String = "routing"
         private const val ZERO_UUID: String = "00000000-0000-0000-0000-000000000000"
         private val KNOWN_CLIENT_TYPES = setOf("happ", "v2rayng", "nekobox", "clash", "sing-box")
         private val MARKER_PORTS = 0..1

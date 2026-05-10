@@ -12,7 +12,7 @@
 - `Domain/Application orchestration`:
   - выбор backend, backend switch, обработка recoverable/non-recoverable ошибок, ретраи
 - `Repositories / Data`:
-  - `RoomProfilesRepository`, `DataStoreUserSettingsRepository`, `AndroidInstalledAppsRepository`
+  - `RoomProfilesRepository`, `RoomSubscriptionRepository`, `DataStoreUserSettingsRepository`, `AndroidInstalledAppsRepository`
 - `Backend adapters`:
   - `XrayBackendAdapter` (через `VpnController` + `PrivateVpnService`)
   - `AmneziaWgBackendAdapter` (через `GoBackend`)
@@ -21,6 +21,7 @@
   - `VpnRuntimeStateStore` (shared runtime state/status/error)
 - `Parser/import`:
   - `ProfileImportParser`, `AmneziaWgConfigParser`
+  - `SubscriptionParser`, `SubscriptionPayloadDecoder`, `HappCrypt5Decryptor`, `HappRoutingCompat`
 - `Logging`:
   - event log в `AppViewModel`
   - runtime-level диагностика в `PrivateVpnService` и backend adapters
@@ -42,6 +43,15 @@
 - Хранятся в Room.
 - Активный профиль хранится в DataStore (`activeProfileId`).
 - При подключении используется активный профиль или первый доступный.
+- Внешний импорт поддерживает Android `VIEW`/`EDIT`/`SEND`/`SEND_MULTIPLE` для ссылок `happ`, `vless`, `vmess`, `trojan`, HTTP(S), `content://` и `file://`.
+
+### 1.3.1 Подписки и HAPP compatibility
+
+- Подписки хранятся как `SubscriptionSource`, дочерние профили связаны через `parentSubscriptionId`.
+- `happ://crypt5/...` расшифровывается до обычного URL, профиля или payload подписки до валидации и сохранения.
+- `HappRoutingCompat` извлекает routing из тела подписки или HTTP-заголовка `routing` и применяет его к Xray-профилям.
+- Compatibility refresh выбирает лучший ответ между base endpoint, HWID endpoint и HAPP endpoint по числу connectable профилей.
+- Marker payload (`0.0.0.0:1`, zero UUID, app-not-supported ответы) не сохраняется как рабочий сервер.
 
 ### 1.4 Split tunneling / trusted apps
 
@@ -132,3 +142,13 @@
   - generic UI/state
 
 Подробный каталог: `docs/error-codes.md`.
+
+## 5. Совместимость Xray Config
+
+Перед запуском Xray `XrayRuntimeConfigPreparer` делает runtime-нормализацию:
+- пересобирает DNS, сохраняя `hosts`, `queryStrategy`, `disableCache`;
+- нормализует REALITY aliases (`pbk/publickey`, `sid/shortid`, `sni/servername`, `fp`, `spx`);
+- подставляет безопасные defaults для `shortId`, `serverName`, `fingerprint`, `spiderX`, когда провайдерский конфиг допускает неполную форму;
+- переводит часть self-check по REALITY в мягкую диагностику, чтобы совместимые, но нетипичные конфиги не блокировались до запуска Xray.
+
+Импорт VLESS-ссылок также поддерживает provider-specific transport параметры: `ws`, `grpc`, `h2/http`, `httpupgrade`, `splithttp`, `xhttp`, TLS `alpn/allowInsecure`, `host/authority`, `path`, `serviceName`, `mode`, `headerType`.

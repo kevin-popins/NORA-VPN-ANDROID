@@ -30,6 +30,13 @@
 | `UI-001` | Generic UI Action Failed | Общая ошибка действия UI | `AppViewModel.handleError` fallback | `Код ошибки: UI-001. Произошла неизвестная ошибка приложения.` | operation-specific technical reason | Да |
 | `UI-002` | Generic UI State Error | Некорректное состояние UI/валидация | `AppViewModel` state validations | `Код ошибки: UI-002. Недопустимое состояние интерфейса.` | validation/context reason | Да |
 
+## HAPP/Subscription Notes
+
+- Ошибка расшифровки `happ://crypt5/...` при импорте профиля или внешней ссылки маппится в `IMPORT-001`.
+- Ошибка расшифровки `happ://crypt5/...` при добавлении URL-подписки маппится в `SUBS-001`.
+- Ошибка обновления HAPP/Marzban подписки, включая HTTP, compatibility retry и parser failure, маппится в `SUBS-002`.
+- Частичная загрузка, где валидные профили сохранены, а часть entries отброшена как marker/invalid, маппится в `SUBS-003`.
+
 ## Примечания по логированию
 
 - UI всегда получает короткий формат: `Код ошибки: <CODE>. <текст>`.

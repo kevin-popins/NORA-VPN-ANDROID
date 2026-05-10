@@ -14,7 +14,8 @@ data class SubscriptionParseResult(
     val base64Decoded: Boolean,
     val rawLineCount: Int,
     val discoveredEntriesCount: Int,
-    val skippedLinesCount: Int
+    val skippedLinesCount: Int,
+    val happRoutingProfile: HappRoutingProfile? = null
 )
 
 class SubscriptionParser(
@@ -25,6 +26,7 @@ class SubscriptionParser(
         val decoded = payloadDecoder.decodeWithDiagnostics(rawPayload)
         val extracted = extractEntries(decoded.payload)
         val entries = extracted.entries
+        val happRoutingProfile = HappRoutingCompat.findFirstRoutingProfile(decoded.payload)
 
         val valid = mutableListOf<ImportedProfileDraft>()
         val warnings = mutableListOf<String>()
@@ -47,6 +49,10 @@ class SubscriptionParser(
         if (entries.isEmpty()) {
             warnings += "В подписке не найдено строк с серверами."
         }
+        if (happRoutingProfile != null) {
+            val routeName = happRoutingProfile.name?.takeIf { it.isNotBlank() } ?: "без названия"
+            warnings += "Обнаружен HAPP Routing профиль '$routeName'."
+        }
         if (valid.isEmpty() && entries.isNotEmpty()) {
             warnings += "В подписке не найдено валидных профилей."
         }
@@ -60,13 +66,21 @@ class SubscriptionParser(
             base64Decoded = decoded.base64Decoded,
             rawLineCount = extracted.rawLineCount,
             discoveredEntriesCount = extracted.entries.size,
-            skippedLinesCount = extracted.skippedLinesCount
+            skippedLinesCount = extracted.skippedLinesCount,
+            happRoutingProfile = happRoutingProfile
         )
     }
 
     private fun extractEntries(decoded: String): ExtractedEntries {
         val trimmed = decoded.removePrefix(BOM).trim()
         if (trimmed.isBlank()) return ExtractedEntries(emptyList(), 0, 0)
+        if (HappRoutingCompat.isRoutingLink(trimmed)) {
+            return ExtractedEntries(
+                entries = emptyList(),
+                rawLineCount = trimmed.lineSequence().count(),
+                skippedLinesCount = 1
+            )
+        }
 
         if (looksLikeSingleConfig(trimmed)) {
             return ExtractedEntries(
@@ -101,6 +115,10 @@ class SubscriptionParser(
                 skippedLineCount += 1
                 return@forEach
             }
+            if (HappRoutingCompat.isRoutingLink(normalizedLine)) {
+                skippedLineCount += 1
+                return@forEach
+            }
             entries += normalizedLine
         }
 
@@ -123,10 +141,10 @@ class SubscriptionParser(
                 is JSONObject -> entries += item.toString()
                 is String -> {
                     val normalized = item.trim()
-                    if (normalized.isNotBlank()) {
-                        entries += normalized
-                    } else {
+                    if (normalized.isBlank() || HappRoutingCompat.isRoutingLink(normalized)) {
                         skipped += 1
+                    } else {
+                        entries += normalized
                     }
                 }
 

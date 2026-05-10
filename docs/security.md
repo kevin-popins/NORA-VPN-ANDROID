@@ -4,6 +4,8 @@
 - Реальные VPN-конфиги и дампы подписок.
 - Реальные `PrivateKey`, `PresharedKey`, `PublicKey`, UUID, endpoint-адреса провайдеров.
 - Реальные subscription URL, токены и любые авторизационные данные.
+- Реальные `happ://crypt5/...` payload: после расшифровки они могут содержать subscription URL, токены или готовые профили.
+- Реальные `happ://routing/...` ссылки, если в них есть приватные домены, DNS hosts или provider-specific правила маршрутизации.
 - Локальные файлы с секретами (`.env*`, приватные `.conf`, keystore-артефакты).
 
 ## Политика Тестовых Fixture
@@ -17,7 +19,12 @@
 
 ```powershell
 rg -n --hidden -S "PrivateKey\\s*=|PresharedKey\\s*=|PublicKey\\s*=|Endpoint\\s*=" . -g "!.git/**" -g "!**/build/**"
-rg -n --hidden -S "vless://|vmess://|trojan://|https?://|token=|access_token" . -g "!.git/**" -g "!**/build/**"
+rg -n --hidden -S "vless://|vmess://|trojan://|happ://|https?://|token=|access_token" . -g "!.git/**" -g "!**/build/**"
 ```
 
 Если найдено что-то похожее на реальные данные провайдера, такие строки нужно заменить на синтетические до коммита.
+
+## Диагностика Совместимости
+- В логах для HAPP/Marzban подписок используйте body signature, counts, endpoint variant и compatibility mode.
+- Не вставляйте в issue/PR полные `crypt5`, routing или subscription URL.
+- Параметры `pbk`, `publicKey`, `password`, `sid`, `shortId` должны быть замаскированы.

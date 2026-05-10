@@ -25,8 +25,9 @@ class XrayRuntimeConfigPreparer : RuntimeConfigPreparer {
             stageLabel = "Import pipeline"
         )
 
+        val existingDns = root.optJSONObject("dns")
         val dnsNormalization = normalizeDnsServersForRuntime(input.dnsServers)
-        root.put("dns", buildDnsSection(dnsNormalization.servers))
+        root.put("dns", buildDnsSection(dnsNormalization.servers, existingDns))
         dnsNormalization.notes.forEach { note -> notes += note }
         sanitizeLegacyInbounds(
             root = root,
@@ -86,13 +87,23 @@ class XrayRuntimeConfigPreparer : RuntimeConfigPreparer {
         return DEFAULT_PRIMARY_OUTBOUND_TAG
     }
 
-    private fun buildDnsSection(dnsServers: List<String>): JSONObject {
+    private fun buildDnsSection(dnsServers: List<String>, existingDns: JSONObject?): JSONObject {
         val servers = dnsServers
             .map { it.trim() }
             .filter { it.isNotBlank() }
             .ifEmpty { listOf("1.1.1.1", "9.9.9.9") }
 
-        return JSONObject().put("servers", JSONArray(servers))
+        val dns = JSONObject().put("servers", JSONArray(servers))
+        existingDns?.optJSONObject("hosts")?.let { hosts ->
+            dns.put("hosts", JSONObject(hosts.toString()))
+        }
+        existingDns?.optString("queryStrategy")?.takeIf { it.isNotBlank() }?.let { queryStrategy ->
+            dns.put("queryStrategy", queryStrategy)
+        }
+        existingDns?.takeIf { it.has("disableCache") }?.opt("disableCache")?.let { disableCache ->
+            dns.put("disableCache", disableCache)
+        }
+        return dns
     }
 
     private fun normalizeDnsServersForRuntime(dnsServers: List<String>): DnsNormalizationResult {
@@ -531,20 +542,119 @@ class XrayRuntimeConfigPreparer : RuntimeConfigPreparer {
 
             val realitySettings = streamSettings.optJSONObject("realitySettings")
                 ?: throw IllegalArgumentException("security=reality указан, но realitySettings отсутствует")
-            val publicKey = realitySettings.optString("publicKey").trim()
-            val password = realitySettings.optString("password").trim()
+            val publicKey = realitySettings.firstNonBlankString("publicKey", "publickey", "pbk")
+            val password = realitySettings.firstNonBlankString("password")
 
             when {
                 password.isNotBlank() && publicKey.isBlank() -> {
                     realitySettings.put("publicKey", password)
                     notes += "REALITY: добавлен alias realitySettings.publicKey из password (совместимость ссылок VLESS)"
                 }
+
+                publicKey.isNotBlank() && realitySettings.optString("publicKey").isBlank() -> {
+                    realitySettings.put("publicKey", publicKey)
+                    notes += "REALITY: нормализован alias publicKey из альтернативного ключа"
+                }
+            }
+            listOf("publickey", "pbk").forEach { alias ->
+                if (realitySettings.has(alias)) realitySettings.remove(alias)
+            }
+
+            normalizeRealityStringAlias(
+                settings = realitySettings,
+                canonicalKey = "shortId",
+                aliases = listOf("shortid", "sid"),
+                arrayAliases = listOf("shortIds", "shortids"),
+                notes = notes
+            )
+            normalizeRealityStringAlias(
+                settings = realitySettings,
+                canonicalKey = "serverName",
+                aliases = listOf("servername", "server_name", "sni"),
+                arrayAliases = listOf("serverNames", "servernames"),
+                notes = notes
+            )
+            normalizeRealityStringAlias(
+                settings = realitySettings,
+                canonicalKey = "fingerprint",
+                aliases = listOf("fp"),
+                arrayAliases = emptyList(),
+                notes = notes
+            )
+            normalizeRealityStringAlias(
+                settings = realitySettings,
+                canonicalKey = "spiderX",
+                aliases = listOf("spiderx", "spider_x", "spx"),
+                arrayAliases = emptyList(),
+                notes = notes,
+                preserveEmptyValue = true
+            )
+            if (realitySettings.optString("shortId").isBlank() && !realitySettings.has("shortId")) {
+                realitySettings.put("shortId", "")
+                notes += "REALITY: shortId отсутствует; установлен пустой shortId для совместимости с серверами, где разрешён empty shortId"
+            }
+            if (realitySettings.optString("serverName").isBlank()) {
+                outbound.extractFirstVnextAddress()?.let { address ->
+                    realitySettings.put("serverName", address)
+                    notes += "REALITY: serverName отсутствует; использован address '$address'"
+                }
+            }
+            if (realitySettings.optString("fingerprint").isBlank()) {
+                realitySettings.put("fingerprint", "chrome")
+                notes += "REALITY: fingerprint отсутствует; применён default 'chrome'"
+            }
+            if (!realitySettings.has("spiderX")) {
+                realitySettings.put("spiderX", "")
+                notes += "REALITY: spiderX отсутствует; применено пустое значение по умолчанию"
             }
 
             if (realitySettings.has("password")) {
                 realitySettings.remove("password")
                 notes += "REALITY: удалён compatibility-ключ realitySettings.password; в runtime оставлен canonical publicKey"
             }
+        }
+    }
+
+    private fun normalizeRealityStringAlias(
+        settings: JSONObject,
+        canonicalKey: String,
+        aliases: List<String>,
+        arrayAliases: List<String>,
+        notes: MutableList<String>,
+        preserveEmptyValue: Boolean = false
+    ) {
+        val existing = settings.optString(canonicalKey)
+        if (existing.isBlank() && !(preserveEmptyValue && settings.has(canonicalKey))) {
+            var normalized = false
+
+            for (alias in aliases) {
+                val value = settings.optString(alias)
+                if (value.isNotBlank() || (preserveEmptyValue && settings.has(alias) && value.isEmpty())) {
+                    settings.put(canonicalKey, value)
+                    notes += "REALITY: нормализован alias realitySettings.$canonicalKey из $alias"
+                    normalized = true
+                    break
+                }
+            }
+
+            if (!normalized) {
+                for (alias in arrayAliases) {
+                    val values = settings.optJSONArray(alias) ?: continue
+                    val value = (0 until values.length())
+                        .asSequence()
+                        .map { values.optString(it).trim() }
+                        .firstOrNull { it.isNotBlank() }
+                    if (!value.isNullOrBlank()) {
+                        settings.put(canonicalKey, value)
+                        notes += "REALITY: нормализован alias realitySettings.$canonicalKey из $alias[0]"
+                        break
+                    }
+                }
+            }
+        }
+
+        (aliases + arrayAliases).forEach { alias ->
+            if (settings.has(alias)) settings.remove(alias)
         }
     }
 
@@ -666,36 +776,24 @@ class XrayRuntimeConfigPreparer : RuntimeConfigPreparer {
             return isVless
         }
 
-        val missing = mutableListOf<String>()
-        if (network.lowercase() !in setOf("tcp", "raw")) {
-            missing += "streamSettings.network=tcp/raw"
-        }
-        if (flow.isNullOrBlank()) {
-            missing += "settings.vnext[0].users[0].flow"
-        }
         if (realitySettings == null) {
-            missing += "streamSettings.realitySettings"
-        } else {
-            if (realitySettings.optString("publicKey").isBlank() &&
-                realitySettings.optString("password").isBlank()
-            ) {
-                missing += "realitySettings.publicKey/password"
-            }
-            if (realitySettings.optString("serverName").isBlank()) {
-                missing += "realitySettings.serverName"
-            }
-            if (realitySettings.optString("fingerprint").isBlank()) {
-                missing += "realitySettings.fingerprint"
-            }
-            if (realitySettings.optString("shortId").isBlank()) {
-                missing += "realitySettings.shortId"
-            }
-        }
-
-        if (missing.isNotEmpty()) {
             throw IllegalArgumentException(
-                "Self-check runtime: VLESS+REALITY outbound '$tag' неполный, отсутствуют: ${missing.joinToString()}"
+                "Self-check runtime: VLESS+REALITY outbound '$tag' неполный, отсутствует streamSettings.realitySettings"
             )
+        }
+        val softWarnings = mutableListOf<String>()
+        if (realitySettings.optString("publicKey").isBlank() &&
+            realitySettings.optString("password").isBlank()
+        ) {
+            softWarnings += "realitySettings.publicKey/password"
+        }
+        if (realitySettings.optString("serverName").isBlank()) softWarnings += "realitySettings.serverName"
+        if (realitySettings.optString("fingerprint").isBlank()) softWarnings += "realitySettings.fingerprint"
+        if (!realitySettings.has("shortId")) softWarnings += "realitySettings.shortId"
+        if (flow.isNullOrBlank()) softWarnings += "settings.vnext[0].users[0].flow"
+        if (softWarnings.isNotEmpty()) {
+            notes += "Self-check REALITY[$tag]: мягкая совместимость, не блокируем запуск; поля требуют проверки Xray: " +
+                softWarnings.joinToString()
         }
         return true
     }
@@ -734,6 +832,22 @@ class XrayRuntimeConfigPreparer : RuntimeConfigPreparer {
         if (users.length() == 0) return null
         val firstUser = users.optJSONObject(0) ?: return null
         return firstUser.optString("flow").trim().takeIf { it.isNotBlank() }
+    }
+
+    private fun JSONObject.extractFirstVnextAddress(): String? {
+        val settings = optJSONObject("settings") ?: return null
+        val vnext = settings.optJSONArray("vnext") ?: return null
+        if (vnext.length() == 0) return null
+        val firstVnext = vnext.optJSONObject(0) ?: return null
+        return firstVnext.optString("address").trim().takeIf { it.isNotBlank() }
+    }
+
+    private fun JSONObject.firstNonBlankString(vararg keys: String): String {
+        keys.forEach { key ->
+            val value = optString(key).trim()
+            if (value.isNotBlank()) return value
+        }
+        return ""
     }
 
     private fun sha256(input: String): String {
