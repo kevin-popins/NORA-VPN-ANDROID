@@ -205,14 +205,19 @@ class KrotVpnService : VpnService() {
         val builder = Builder()
             .setSession(getString(R.string.vpn_notification_title, "KRot"))
             .setMtu(DEFAULT_MTU)
-            .addAddress(spec.tunnel.clientIp, spec.tunnel.prefixLength())
+            .addAddress(spec.tunnel.clientIp, TUN_ADDRESS_PREFIX)
             .addRoute(DEFAULT_ROUTE, DEFAULT_ROUTE_PREFIX)
 
         applyRoutingPolicy(builder, requestedDns, privateSessionPolicy)
 
         val tun = builder.establish()
             ?: throw IllegalStateException("Не удалось установить KRot TUN интерфейс")
-        appendRuntimeLog("KRot TUN интерфейс установлен, fd=${tun.fd}")
+        appendRuntimeLog(
+            "KRot VPN interface established: fd=${tun.fd} " +
+                "client_ip=${spec.tunnel.clientIp}/$TUN_ADDRESS_PREFIX " +
+                "peer=${spec.tunnel.serverIp} route=$DEFAULT_ROUTE/$DEFAULT_ROUTE_PREFIX " +
+                "dns=${requestedDns.joinToString()} mtu=$DEFAULT_MTU"
+        )
         return tun
     }
 
@@ -390,6 +395,7 @@ class KrotVpnService : VpnService() {
     }
 
     private fun appendRuntimeLog(message: String) {
+        Log.i(TAG, message)
         synchronized(runtimeLogTail) {
             if (runtimeLogTail.size >= MAX_LOG_LINES) {
                 runtimeLogTail.removeFirst()
@@ -418,6 +424,7 @@ class KrotVpnService : VpnService() {
         private const val NOTIFICATION_ID: Int = 102
         private const val CHANNEL_ID: String = "privatevpn_service"
         private const val DEFAULT_MTU: Int = 1400
+        private const val TUN_ADDRESS_PREFIX: Int = 32
         private const val DEFAULT_ROUTE: String = "0.0.0.0"
         private const val DEFAULT_ROUTE_PREFIX: Int = 0
         private const val MAX_LOG_LINES: Int = 80
