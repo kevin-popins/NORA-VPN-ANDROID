@@ -50,8 +50,9 @@ class KrotTunnelSession(
         check(stopped.compareAndSet(true, false)) { "KRot session is already running" }
 
         val rawSocket = Socket()
+        rawSocket.bind(null)
         if (!protectSocket(rawSocket)) {
-            throw IllegalStateException("KRot socket protect() returned false")
+            log("KRot socket protect() returned false after bind; continuing with app-level VPN exclusion")
         }
         rawSocket.tcpNoDelay = true
         rawSocket.connect(InetSocketAddress(spec.server.host, spec.server.port), CONNECT_TIMEOUT_MS)
