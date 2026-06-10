@@ -4,6 +4,8 @@ import com.privatevpn.app.profiles.model.ProfileType
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.nio.charset.StandardCharsets
+import java.util.Base64
 
 class ProfileImportParserTest {
 
@@ -49,4 +51,71 @@ class ProfileImportParserTest {
         assertTrue(parsed.importWarnings.any { it.contains("I2", ignoreCase = true) })
     }
 
+    @Test
+    fun `krot connection key imports successfully`() {
+        val parsed = parser.parse(krotKey())
+
+        assertEquals(ProfileType.KROT, parsed.type)
+        assertEquals("KRot 198.51.100.42:443", parsed.displayName)
+        assertEquals(listOf("1.1.1.1", "8.8.8.8"), parsed.dnsServers)
+        assertTrue(parsed.sourceRaw.startsWith("nora1."))
+    }
+
+    @Test
+    fun `krot normalized json preserves connection fields`() {
+        val parsed = parser.parse(krotKey())
+        val normalized = parsed.normalizedJson.orEmpty()
+
+        assertTrue(normalized.contains("\"host\": \"198.51.100.42\""))
+        assertTrue(normalized.contains("\"tls_name\": \"example.com\""))
+        assertTrue(normalized.contains("\"credential_id\": \"test-credential\""))
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `krot broken base64 is rejected`() {
+        parser.parse("nora1.not-base64!!")
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `krot wrong schema is rejected`() {
+        parser.parse(krotKey(schema = "nora-connection-key-v2"))
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `krot empty credential key is rejected`() {
+        parser.parse(krotKey(credentialKey = ""))
+    }
+
+    private fun krotKey(
+        schema: String = "nora-connection-key-v1",
+        credentialKey: String = Base64.getEncoder().encodeToString(ByteArray(32) { index -> (index + 1).toByte() })
+    ): String {
+        val json = """
+            {
+              "schema": "$schema",
+              "profile_id": "test-profile",
+              "transport_profile": "tls_http_cover_v1",
+              "server": {
+                "host": "198.51.100.42",
+                "port": 443,
+                "tls_name": "example.com",
+                "cover_host": "example.com"
+              },
+              "credentials": {
+                "credential_id": "test-credential",
+                "credential_key": "$credentialKey"
+              },
+              "tunnel": {
+                "client_ip": "10.66.0.2",
+                "server_ip": "10.66.0.1",
+                "cidr": "10.66.0.0/24",
+                "dns": ["1.1.1.1", "8.8.8.8"]
+              }
+            }
+        """.trimIndent()
+        val encoded = Base64.getUrlEncoder()
+            .withoutPadding()
+            .encodeToString(json.toByteArray(StandardCharsets.UTF_8))
+        return "nora1.$encoded"
+    }
 }

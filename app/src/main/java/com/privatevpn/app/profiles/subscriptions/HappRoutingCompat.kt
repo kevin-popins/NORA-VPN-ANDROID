@@ -38,7 +38,7 @@ object HappRoutingCompat {
         draft: ImportedProfileDraft,
         routingProfile: HappRoutingProfile
     ): ImportedProfileDraft {
-        if (draft.type == ProfileType.AMNEZIA_WG_20) return draft
+        if (draft.type == ProfileType.AMNEZIA_WG_20 || draft.type == ProfileType.KROT) return draft
 
         val payload = draft.normalizedJson?.trim().orEmpty()
         if (!payload.startsWith("{")) return draft

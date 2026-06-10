@@ -1,6 +1,7 @@
 package com.privatevpn.app.profiles.importer
 
 import android.net.Uri
+import com.privatevpn.app.core.backend.krot.KrotConnectionSpec
 import com.privatevpn.app.core.dns.DefaultDnsProvider
 import com.privatevpn.app.profiles.awg.AmneziaWgConfigParser
 import com.privatevpn.app.profiles.model.ImportedProfileDraft
@@ -20,6 +21,7 @@ class ProfileImportParser {
 
         return when {
             HappCrypt5Decryptor.isCrypt5Link(input) -> parse(HappCrypt5Decryptor.decryptToText(input))
+            KrotConnectionSpec.isConnectionKey(input) -> parseKrotConnectionKey(input)
             input.startsWith(VLESS_PREFIX, ignoreCase = true) -> parseVless(input)
             input.startsWith(TROJAN_PREFIX, ignoreCase = true) -> parseUriProfile(input, ProfileType.TROJAN)
             input.startsWith(VMESS_PREFIX, ignoreCase = true) -> parseVmess(input)
@@ -27,6 +29,22 @@ class ProfileImportParser {
             looksLikeJson(input) -> parseXrayJson(input)
             else -> throw IllegalArgumentException("Неподдерживаемый формат профиля.")
         }
+    }
+
+    private fun parseKrotConnectionKey(input: String): ImportedProfileDraft {
+        val spec = KrotConnectionSpec.parseConnectionKey(input)
+        val dnsFallbackApplied = spec.tunnel.dns.isEmpty()
+
+        return ImportedProfileDraft(
+            displayName = "KRot ${spec.server.host}:${spec.server.port}",
+            type = ProfileType.KROT,
+            sourceRaw = input,
+            normalizedJson = spec.normalizedJson,
+            dnsServers = spec.dnsServers,
+            dnsFallbackApplied = dnsFallbackApplied,
+            isPartialImport = false,
+            importWarnings = emptyList()
+        )
     }
 
     private fun parseVless(input: String): ImportedProfileDraft {

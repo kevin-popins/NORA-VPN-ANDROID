@@ -120,6 +120,20 @@ object AppErrors {
             recoverable = true
         )
 
+    fun krotRuntimeStartFailed(technicalReason: String? = null): AppError =
+        AppError(
+            code = AppErrorCode.KROT_101,
+            technicalReason = sanitizeTechnicalReason(technicalReason),
+            recoverable = true
+        )
+
+    fun krotRuntimeStopFailed(technicalReason: String? = null): AppError =
+        AppError(
+            code = AppErrorCode.KROT_102,
+            technicalReason = sanitizeTechnicalReason(technicalReason),
+            recoverable = true
+        )
+
     fun socksInvalidPort(technicalReason: String? = null): AppError =
         AppError(
             code = AppErrorCode.SOCKS_001,

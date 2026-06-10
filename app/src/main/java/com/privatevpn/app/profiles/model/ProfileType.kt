@@ -6,5 +6,6 @@ enum class ProfileType {
     TROJAN,
     XRAY_JSON,
     XRAY_VLESS_REALITY,
-    AMNEZIA_WG_20
+    AMNEZIA_WG_20,
+    KROT
 }

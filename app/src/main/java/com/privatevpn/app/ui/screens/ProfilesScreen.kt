@@ -1650,6 +1650,7 @@ private fun profileTypeLabel(type: ProfileType): String = when (type) {
     ProfileType.XRAY_JSON -> "Xray JSON"
     ProfileType.XRAY_VLESS_REALITY -> "Xray VLESS + REALITY"
     ProfileType.AMNEZIA_WG_20 -> "AmneziaWG 2.0"
+    ProfileType.KROT -> "KRot"
 }
 
 private fun socksStatusLabel(

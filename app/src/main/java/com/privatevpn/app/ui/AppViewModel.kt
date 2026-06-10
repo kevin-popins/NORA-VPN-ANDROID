@@ -14,6 +14,8 @@ import com.privatevpn.app.core.backend.adapter.BackendAdapter
 import com.privatevpn.app.core.backend.adapter.BackendStartResult
 import com.privatevpn.app.core.backend.awg.AmneziaWgBackendAdapter
 import com.privatevpn.app.core.backend.awg.AmneziaWgRuntimeConfigBuilder
+import com.privatevpn.app.core.backend.krot.KrotBackendAdapter
+import com.privatevpn.app.core.backend.krot.KrotConnectionSpec
 import com.privatevpn.app.core.backend.xray.XrayBackendAdapter
 import com.privatevpn.app.core.backend.xray.XrayConfigNormalizer
 import com.privatevpn.app.core.backend.xray.XrayRuntimeConfigPreparer
@@ -103,6 +105,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val awgBackendAdapter = AmneziaWgBackendAdapter(
         appContext = application.applicationContext,
         runtimeConfigBuilder = AmneziaWgRuntimeConfigBuilder()
+    )
+    private val krotBackendAdapter = KrotBackendAdapter(
+        appContext = application.applicationContext
     )
 
     @Volatile
@@ -654,6 +659,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 error = error,
                 fallbackCode = when (activeBackendProfileType) {
                     ProfileType.AMNEZIA_WG_20 -> AppErrorCode.AWG_102
+                    ProfileType.KROT -> AppErrorCode.KROT_102
                     else -> AppErrorCode.XRAY_102
                 }
             )
@@ -1482,10 +1488,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     currentStatus == VpnConnectionStatus.CONNECTING -> {
                     val xrayStopError = runCatching { xrayBackendAdapter.stop().getOrThrow() }.exceptionOrNull()
                     val awgStopError = runCatching { awgBackendAdapter.stop().getOrThrow() }.exceptionOrNull()
-                    if (xrayStopError != null && awgStopError != null) {
+                    val krotStopError = runCatching { krotBackendAdapter.stop().getOrThrow() }.exceptionOrNull()
+                    if (xrayStopError != null && awgStopError != null && krotStopError != null) {
                         throw IllegalStateException(
                             "Не удалось остановить backend switch fallback. " +
-                                "xray='${xrayStopError.message}', awg='${awgStopError.message}'"
+                                "xray='${xrayStopError.message}', awg='${awgStopError.message}', " +
+                                "krot='${krotStopError.message}'"
                         )
                     }
                 }
@@ -1590,6 +1598,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
         return when (backendType) {
             ProfileType.AMNEZIA_WG_20 -> AppErrors.awgRuntimeStartFailed(error.message)
+            ProfileType.KROT -> AppErrors.krotRuntimeStartFailed(error.message)
             else -> AppErrors.xrayRuntimeStartFailed(error.message)
         }
     }
@@ -1606,6 +1615,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private fun backendTypeLabel(type: ProfileType?): String {
         return when (type) {
             ProfileType.AMNEZIA_WG_20 -> "AmneziaWG 2.0"
+            ProfileType.KROT -> "KRot"
             null -> "unknown"
             else -> "Xray"
         }
@@ -1642,7 +1652,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             AppErrorCode.XRAY_101,
             AppErrorCode.XRAY_102,
             AppErrorCode.AWG_101,
-            AppErrorCode.AWG_102 -> true
+            AppErrorCode.AWG_102,
+            AppErrorCode.KROT_101,
+            AppErrorCode.KROT_102 -> true
 
             else -> false
         }
@@ -1865,6 +1877,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private fun resolveBackendAdapter(profileType: ProfileType): BackendAdapter {
         return when (profileType) {
             ProfileType.AMNEZIA_WG_20 -> awgBackendAdapter
+            ProfileType.KROT -> krotBackendAdapter
             else -> xrayBackendAdapter
         }
     }
@@ -1874,6 +1887,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
         return when (activeBackendProfileType ?: lastBackendProfileType ?: uiState.value.activeProfile?.type) {
             ProfileType.AMNEZIA_WG_20 -> awgBackendAdapter
+            ProfileType.KROT -> krotBackendAdapter
             else -> xrayBackendAdapter
         }
     }
@@ -2027,6 +2041,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             extractAwgEndpoint(profile.sourceRaw)?.let { return it }
             extractAwgEndpoint(profile.normalizedJson)?.let { return it }
         }
+        if (profile.type == ProfileType.KROT) {
+            extractKrotEndpoint(profile.normalizedJson)?.let { return it }
+            extractKrotEndpoint(profile.sourceRaw)?.let { return it }
+        }
 
         extractUriEndpoint(profile.sourceRaw)?.let { return it }
         extractXrayEndpoint(profile.normalizedJson)?.let { return it }
@@ -2139,6 +2157,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         return parseHostPort(endpoint)
     }
 
+    private fun extractKrotEndpoint(raw: String?): ProfileEndpoint? {
+        val payload = raw?.trim().orEmpty()
+        if (payload.isBlank()) return null
+        val spec = runCatching { KrotConnectionSpec.parseProfilePayload(payload) }.getOrNull()
+            ?: return null
+        return ProfileEndpoint(host = spec.server.host, port = spec.server.port)
+    }
+
     private fun extractXrayEndpoint(raw: String?): ProfileEndpoint? {
         raw ?: return null
         val text = raw.trim()
@@ -2195,11 +2221,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             "vmess://",
             "trojan://",
             "happ://",
+            "nora1.",
             "http://",
             "https://"
         )
         val EXTERNAL_LINK_REGEX = Regex(
-            pattern = "\\b(?:vless|vmess|trojan|happ|https?)://\\S+",
+            pattern = "\\b(?:vless|vmess|trojan|happ|https?)://\\S+|\\bnora1\\.[A-Za-z0-9_-]+={0,2}",
             options = setOf(RegexOption.IGNORE_CASE)
         )
         val BACKEND_WARMUP_ERROR_MARKERS = listOf(

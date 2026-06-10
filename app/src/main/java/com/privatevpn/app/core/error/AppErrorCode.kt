@@ -66,6 +66,18 @@ enum class AppErrorCode(
         defaultUserMessage = "Не удалось корректно остановить AmneziaWG runtime.",
         recoverable = true
     ),
+    KROT_101(
+        code = "KROT-101",
+        domain = "krot runtime",
+        defaultUserMessage = "Не удалось запустить KRot runtime.",
+        recoverable = true
+    ),
+    KROT_102(
+        code = "KROT-102",
+        domain = "krot runtime",
+        defaultUserMessage = "Не удалось корректно остановить KRot runtime.",
+        recoverable = true
+    ),
     SOCKS_001(
         code = "SOCKS-001",
         domain = "socks/localhost",

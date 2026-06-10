@@ -14,6 +14,7 @@ import com.privatevpn.app.R
 import com.privatevpn.app.core.backend.adapter.BackendAdapter
 import com.privatevpn.app.core.backend.awg.AmneziaWgBackendAdapter
 import com.privatevpn.app.core.backend.awg.AmneziaWgRuntimeConfigBuilder
+import com.privatevpn.app.core.backend.krot.KrotBackendAdapter
 import com.privatevpn.app.core.backend.xray.XrayBackendAdapter
 import com.privatevpn.app.core.backend.xray.XrayConfigNormalizer
 import com.privatevpn.app.core.backend.xray.XrayRuntimeConfigPreparer
@@ -163,6 +164,9 @@ private class VpnQuickToggleExecutor(
             runtimeConfigBuilder = AmneziaWgRuntimeConfigBuilder()
         )
     }
+    private val krotBackendAdapter by lazy {
+        KrotBackendAdapter(appContext = context)
+    }
 
     suspend fun toggle(): Result<Unit> {
         return when (vpnManager.status.value) {
@@ -221,20 +225,23 @@ private class VpnQuickToggleExecutor(
     private suspend fun disconnect(): Result<Unit> {
         val xrayResult = runCatching { xrayBackendAdapter.stop().getOrThrow() }
         val awgResult = runCatching { awgBackendAdapter.stop().getOrThrow() }
+        val krotResult = runCatching { krotBackendAdapter.stop().getOrThrow() }
 
-        return if (xrayResult.isSuccess || awgResult.isSuccess) {
+        return if (xrayResult.isSuccess || awgResult.isSuccess || krotResult.isSuccess) {
             Result.success(Unit)
         } else {
-            val firstError = xrayResult.exceptionOrNull() ?: awgResult.exceptionOrNull()
+            val firstError = xrayResult.exceptionOrNull()
+                ?: awgResult.exceptionOrNull()
+                ?: krotResult.exceptionOrNull()
             Result.failure(firstError ?: IllegalStateException("Не удалось отключить VPN"))
         }
     }
 
     private fun resolveBackend(type: ProfileType): BackendAdapter {
-        return if (type == ProfileType.AMNEZIA_WG_20) {
-            awgBackendAdapter
-        } else {
-            xrayBackendAdapter
+        return when (type) {
+            ProfileType.AMNEZIA_WG_20 -> awgBackendAdapter
+            ProfileType.KROT -> krotBackendAdapter
+            else -> xrayBackendAdapter
         }
     }
 

@@ -16,6 +16,8 @@
 | `XRAY-102` | Xray Runtime Stop Failed | Ошибка остановки Xray runtime | `PrivateVpnService.disconnectVpn`, `AppViewModel.disconnectVpnInternal` fallback | `Код ошибки: XRAY-102. Не удалось корректно остановить Xray runtime.` | исключение stop/cleanup | Да |
 | `AWG-101` | AWG Runtime Start Failed | Ошибка старта AmneziaWG runtime | `AmneziaWgBackendAdapter.start`, `AppViewModel.mapBackendStartError` | `Код ошибки: AWG-101. Не удалось запустить AmneziaWG runtime.` | stack/cause из `GoBackend.setState` | Да |
 | `AWG-102` | AWG Runtime Stop Failed | Ошибка остановки AmneziaWG runtime | `AmneziaWgBackendAdapter.stop`, `AppViewModel.disconnectVpnInternal` fallback | `Код ошибки: AWG-102. Не удалось корректно остановить AmneziaWG runtime.` | stop failure details | Да |
+| `KROT-101` | KRot Runtime Start Failed | Ошибка старта KRot runtime/data-plane | `KrotVpnService.connectVpn`, `AppViewModel.mapBackendStartError` | `Код ошибки: KROT-101. Не удалось запустить KRot runtime.` | TLS/hidden-auth/TUN/runtime-tail причина | Да |
+| `KROT-102` | KRot Runtime Stop Failed | Ошибка остановки KRot runtime | `KrotVpnService.disconnectVpn`, `AppViewModel.disconnectVpnInternal` fallback | `Код ошибки: KROT-102. Не удалось корректно остановить KRot runtime.` | stop/cleanup failure details | Да |
 | `SOCKS-001` | Socks Invalid Port | Некорректный порт localhost SOCKS | `AppViewModel.saveSocksSettings` | `Код ошибки: SOCKS-001. Порт SOCKS должен быть в диапазоне 1-65535.` | invalid port value | Да |
 | `SOCKS-002` | Socks Auth Required | Для localhost SOCKS отсутствуют логин/пароль | `AppViewModel.saveSocksSettings` | `Код ошибки: SOCKS-002. Для localhost SOCKS обязательны логин и пароль.` | missing credentials context | Да |
 | `SPLIT-001` | Split Trusted Apps Empty | Включен split mode без trusted apps | `AppViewModel.connectVpnInternal` | `Код ошибки: SPLIT-001. В режиме приватной сессии выберите хотя бы одно доверенное приложение.` | privateSession enabled + empty trusted list | Да |
@@ -42,4 +44,4 @@
 - UI всегда получает короткий формат: `Код ошибки: <CODE>. <текст>`.
 - Dev-лог использует расширенный формат:
   - `[CODE] domain=<...> status=<recoverable/fatal> user='<...>' tech='<...>'`
-- Для Xray runtime дополнительно пишется `runtime tail`, чтобы видеть причину без вывода сырой трассы пользователю.
+- Для Xray/KRot runtime дополнительно пишется `runtime tail`, чтобы видеть причину без вывода сырой трассы пользователю.
