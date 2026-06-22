@@ -27,6 +27,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import java.io.File
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class PrivateVpnService : VpnService() {
@@ -62,6 +63,11 @@ class PrivateVpnService : VpnService() {
 
     @Volatile
     private var currentProfileName: String? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        serviceRunning.set(true)
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -116,6 +122,7 @@ class PrivateVpnService : VpnService() {
     override fun onBind(intent: Intent?): IBinder? = super.onBind(intent)
 
     override fun onDestroy() {
+        serviceRunning.set(false)
         cleanupResources()
         serviceScope.cancel()
         super.onDestroy()
@@ -572,6 +579,9 @@ class PrivateVpnService : VpnService() {
 
     companion object {
         private const val TAG: String = "PrivateVpnService"
+        fun isRunning(): Boolean = serviceRunning.get()
+
+        const val FOREGROUND_NOTIFICATION_ID: Int = 101
         const val ACTION_CONNECT: String = "com.privatevpn.app.vpn.ACTION_CONNECT"
         const val ACTION_DISCONNECT: String = "com.privatevpn.app.vpn.ACTION_DISCONNECT"
         const val EXTRA_DNS_SERVERS: String = "extra_dns_servers"
@@ -587,7 +597,7 @@ class PrivateVpnService : VpnService() {
         const val ACTION_UPDATE_NOTIFICATION_PROFILE: String =
             "com.privatevpn.app.vpn.ACTION_UPDATE_NOTIFICATION_PROFILE"
 
-        private const val NOTIFICATION_ID: Int = 101
+        private const val NOTIFICATION_ID: Int = FOREGROUND_NOTIFICATION_ID
         private const val CHANNEL_ID: String = "privatevpn_service"
         private const val DEFAULT_MTU: Int = 1500
         private const val TUN_ADDRESS: String = "10.16.0.2"
@@ -599,6 +609,7 @@ class PrivateVpnService : VpnService() {
         private const val RUNTIME_CONFIG_LOG_CHUNK_SIZE: Int = 1500
         private const val MAX_RUNTIME_TAIL_IN_ERROR: Int = 1800
         private const val ERROR_LOG_CHUNK_SIZE: Int = 900
+        private val serviceRunning = AtomicBoolean(false)
     }
 
     private fun logErrorTechnicalChunks(appError: AppError) {

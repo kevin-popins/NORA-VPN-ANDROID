@@ -2,6 +2,7 @@ package com.privatevpn.app.core.backend.krot
 
 import android.content.Context
 import android.content.Intent
+import android.app.NotificationManager
 import android.net.VpnService
 import androidx.core.content.ContextCompat
 import com.privatevpn.app.core.backend.adapter.BackendAdapter
@@ -13,6 +14,7 @@ import com.privatevpn.app.settings.SocksSettings
 import com.privatevpn.app.vpn.VpnConnectionStatus
 import com.privatevpn.app.vpn.VpnQuickSettingsTileService
 import com.privatevpn.app.vpn.VpnRuntimeStateStore
+import com.privatevpn.app.vpn.PrivateVpnService
 import com.privatevpn.app.vpn.krot.KrotVpnService
 
 class KrotBackendAdapter(
@@ -36,6 +38,10 @@ class KrotBackendAdapter(
                     )
                 )
             }
+
+            context.stopService(Intent(context, PrivateVpnService::class.java))
+            context.getSystemService(NotificationManager::class.java)
+                .cancel(PrivateVpnService.FOREGROUND_NOTIFICATION_ID)
 
             val payload = profile.normalizedJson ?: profile.sourceRaw
             val spec = KrotConnectionSpec.parseProfilePayload(payload)

@@ -6,6 +6,9 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
 import android.util.Log
@@ -26,6 +29,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicBoolean
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class KrotVpnService : VpnService() {
@@ -38,6 +42,10 @@ class KrotVpnService : VpnService() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
     private val connectLock = Any()
     private val runtimeLogTail = ArrayDeque<String>()
+    private val networkAvailable = AtomicBoolean(true)
+
+    @Volatile
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     @Volatile
     private var session: KrotTunnelSession? = null
@@ -50,6 +58,11 @@ class KrotVpnService : VpnService() {
 
     @Volatile
     private var currentProfileName: String? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        registerNetworkMonitor()
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -87,6 +100,7 @@ class KrotVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        unregisterNetworkMonitor()
         cleanupResources()
         serviceScope.cancel()
         super.onDestroy()
@@ -152,6 +166,7 @@ class KrotVpnService : VpnService() {
                         )
                     },
                     protectSocket = { socket -> protect(socket) },
+                    isNetworkAvailable = { networkAvailable.get() },
                     log = ::appendRuntimeLog,
                     onFailure = { error ->
                         failWithError(
@@ -282,6 +297,50 @@ class KrotVpnService : VpnService() {
         session = null
         VpnRuntimeStateStore.setInternalDataPlanePort(null)
         VpnRuntimeStateStore.setAppTrafficMode(AppTrafficMode.UNKNOWN)
+    }
+
+    private fun registerNetworkMonitor() {
+        val manager = getSystemService(ConnectivityManager::class.java) ?: return
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                refreshNetworkAvailability("network available")
+            }
+
+            override fun onLost(network: Network) {
+                refreshNetworkAvailability("network lost")
+            }
+
+            override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
+                refreshNetworkAvailability("network capabilities changed")
+            }
+        }
+        runCatching {
+            manager.registerDefaultNetworkCallback(callback)
+            networkCallback = callback
+            refreshNetworkAvailability("network monitor registered")
+        }.onFailure { error ->
+            Log.w(TAG, "KRot network monitor registration failed", error)
+        }
+    }
+
+    private fun unregisterNetworkMonitor() {
+        val callback = networkCallback ?: return
+        networkCallback = null
+        runCatching {
+            getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(callback)
+        }
+    }
+
+    private fun refreshNetworkAvailability(reason: String) {
+        val manager = getSystemService(ConnectivityManager::class.java) ?: return
+        val usable = manager.allNetworks.any { network ->
+            val capabilities = manager.getNetworkCapabilities(network) ?: return@any false
+            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+        }
+        if (networkAvailable.getAndSet(usable) != usable) {
+            appendRuntimeLog("KRot network availability=$usable ($reason)")
+        }
     }
 
     private fun failWithError(appError: AppError) {

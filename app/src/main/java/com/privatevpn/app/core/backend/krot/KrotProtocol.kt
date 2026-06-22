@@ -14,6 +14,8 @@ import java.security.SecureRandom
 import java.security.spec.ECGenParameterSpec
 import java.security.spec.X509EncodedKeySpec
 import java.util.Base64
+import org.json.JSONArray
+import org.json.JSONObject
 import javax.crypto.Cipher
 import javax.crypto.KeyAgreement
 import javax.crypto.Mac
@@ -27,7 +29,9 @@ import javax.net.ssl.SSLSocketFactory
 class KrotTransportSession(
     private val rawSocket: Socket,
     private val tlsSocket: SSLSocket,
-    val secureStream: KrotSecureStream
+    val secureStream: KrotSecureStream,
+    val resumeTicket: String,
+    val resumeAccepted: Boolean
 ) : Closeable {
     override fun close() {
         runCatching { secureStream.close() }
@@ -39,7 +43,12 @@ class KrotTransportSession(
 object KrotProtocol {
     private val secureRandom = SecureRandom()
 
-    fun open(rawSocket: Socket, spec: KrotConnectionSpec, log: (String) -> Unit = {}): KrotTransportSession {
+    fun open(
+        rawSocket: Socket,
+        spec: KrotConnectionSpec,
+        resumeTicket: String? = null,
+        log: (String) -> Unit = {}
+    ): KrotTransportSession {
         val tlsName = spec.server.tlsName.ifBlank { spec.server.host }
         val tlsSocket = (SSLSocketFactory.getDefault() as SSLSocketFactory)
             .createSocket(rawSocket, tlsName, spec.server.port, true) as SSLSocket
@@ -54,7 +63,7 @@ object KrotProtocol {
         val keyPair = keyPairGenerator.generateKeyPair()
         val clientPublic = keyPair.public.encoded
         val clientNonce = randomBytes(16)
-        val hello = buildClientHello(spec, clientNonce, clientPublic)
+        val hello = buildClientHello(spec, clientNonce, clientPublic, resumeTicket)
 
         val coverPath = "/assets/${randomBytes(8).toHexLower()}.bin"
         val header = buildString {
@@ -79,6 +88,7 @@ object KrotProtocol {
             "KRot cover response was not HTTP 200"
         }
         val parsed = parseServerHello(response.body, spec, clientNonce)
+        val resumeCapabilities = parseResumeCapabilities(parsed.capabilities)
 
         val serverPublic = KeyFactory.getInstance("EC")
             .generatePublic(X509EncodedKeySpec(parsed.publicKey))
@@ -98,7 +108,13 @@ object KrotProtocol {
             serverNonce = parsed.nonce
         )
         log("KRot hidden auth accepted; encrypted record layer ready")
-        return KrotTransportSession(rawSocket = rawSocket, tlsSocket = tlsSocket, secureStream = secure)
+        return KrotTransportSession(
+            rawSocket = rawSocket,
+            tlsSocket = tlsSocket,
+            secureStream = secure,
+            resumeTicket = resumeCapabilities.ticket,
+            resumeAccepted = resumeCapabilities.accepted
+        )
     }
 
     private fun SSLParameters.withSni(host: String): SSLParameters {
@@ -107,8 +123,13 @@ object KrotProtocol {
         return this
     }
 
-    private fun buildClientHello(spec: KrotConnectionSpec, nonce: ByteArray, publicKey: ByteArray): ByteArray {
-        val capabilities = buildCapabilityJson(spec).toByteArray(StandardCharsets.UTF_8)
+    private fun buildClientHello(
+        spec: KrotConnectionSpec,
+        nonce: ByteArray,
+        publicKey: ByteArray,
+        resumeTicket: String?
+    ): ByteArray {
+        val capabilities = buildCapabilityJson(spec, resumeTicket).toByteArray(StandardCharsets.UTF_8)
         val prefix = ByteArrayOutputStream().use { ms ->
             ms.write(nonce)
             ms.write(credentialTag(spec, nonce))
@@ -164,15 +185,23 @@ object KrotProtocol {
             )
         ).copyOfRange(0, 16)
 
-    private fun buildCapabilityJson(spec: KrotConnectionSpec): String =
-        """
-        {
-          "transport_profile": "${spec.transportProfile}",
-          "relay": ["packet_v1"],
-          "commands": ["packet", "ping", "pong", "close"],
-          "compliance": "NVP-1D"
-        }
-        """.trimIndent()
+    private fun buildCapabilityJson(spec: KrotConnectionSpec, resumeTicket: String?): String =
+        JSONObject()
+            .put("transport_profile", spec.transportProfile)
+            .put("relay", JSONArray().put("packet_v1"))
+            .put("commands", JSONArray().put("packet").put("ping").put("pong").put("close").put("resume"))
+            .put("compliance", "NVP-1D")
+            .put("session_resume_v1", true)
+            .put("resume_ticket", resumeTicket.orEmpty())
+            .toString()
+
+    private fun parseResumeCapabilities(capabilities: ByteArray): KrotResumeCapabilities = runCatching {
+        val root = JSONObject(String(capabilities, StandardCharsets.UTF_8))
+        KrotResumeCapabilities(
+            ticket = root.optString("resume_ticket").trim(),
+            accepted = root.optBoolean("resume_accepted", false)
+        )
+    }.getOrDefault(KrotResumeCapabilities())
 
     private fun readHttpResponse(input: InputStream): HttpResponse {
         val headerBytes = ArrayList<Byte>(512)
@@ -213,6 +242,11 @@ object KrotProtocol {
         val capabilities: ByteArray
     )
 
+    private data class KrotResumeCapabilities(
+        val ticket: String = "",
+        val accepted: Boolean = false
+    )
+
     private const val HANDSHAKE_TIMEOUT_MS = 15_000
 }
 
@@ -220,7 +254,8 @@ enum class KrotFrameType(val code: Int) {
     Packet(1),
     Ping(2),
     Pong(3),
-    Close(4);
+    Close(4),
+    Resume(5);
 
     companion object {
         fun fromCode(code: Int): KrotFrameType? = entries.firstOrNull { it.code == code }

@@ -106,6 +106,9 @@ class VpnController(private val appContext: Context) {
         if (status.value != VpnConnectionStatus.CONNECTED && status.value != VpnConnectionStatus.CONNECTING) {
             return
         }
+        if (!PrivateVpnService.isRunning()) {
+            return
+        }
 
         runCatching {
             val intent = Intent(appContext, PrivateVpnService::class.java).apply {

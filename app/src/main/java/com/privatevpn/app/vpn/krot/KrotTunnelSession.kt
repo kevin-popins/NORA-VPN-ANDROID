@@ -14,15 +14,19 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 class KrotTunnelSession(
     private val spec: KrotConnectionSpec,
     private val establishTunInterface: () -> ParcelFileDescriptor,
     private val protectSocket: (Socket) -> Boolean,
+    private val isNetworkAvailable: () -> Boolean,
     private val log: (String) -> Unit,
     private val onFailure: (Throwable) -> Unit
 ) {
@@ -38,12 +42,18 @@ class KrotTunnelSession(
     private val tunWritePackets = AtomicLong(0)
     private val tunWriteBytes = AtomicLong(0)
     private val droppedIpv6Packets = AtomicLong(0)
+    private val resumeAttempts = AtomicLong(0)
+    private val resumeSuccesses = AtomicLong(0)
+    private val resumeLock = ReentrantLock()
 
     @Volatile
     private var lastError: String? = null
 
     @Volatile
     private var transport: KrotTransportSession? = null
+
+    @Volatile
+    private var resumeTicket: String? = null
 
     @Volatile
     private var tunInterface: ParcelFileDescriptor? = null
@@ -57,27 +67,19 @@ class KrotTunnelSession(
     fun start() {
         check(stopped.compareAndSet(true, false)) { "KRot session is already running" }
 
-        val rawSocket = Socket()
-        rawSocket.bind(null)
-        if (!protectSocket(rawSocket)) {
-            lastError = "KRot socket protect() returned false before connect"
-            log("KRot socket protect() returned false before connect; continuing with app-level VPN exclusion")
-        } else {
-            log("KRot socket protected before connect")
-        }
-        rawSocket.tcpNoDelay = true
-        rawSocket.connect(InetSocketAddress(spec.server.host, spec.server.port), CONNECT_TIMEOUT_MS)
-        log("KRot TCP cover channel established: ${spec.server.host}:${spec.server.port}")
-
-        val openedTransport = KrotProtocol.open(rawSocket, spec, log)
+        val openedTransport = openTransport(resumeTicket = null, requireResume = false)
         transport = openedTransport
+        resumeTicket = openedTransport.resumeTicket.takeIf { it.isNotBlank() }
         log("KRot session established")
+        if (resumeTicket != null) {
+            log("KRot session_resume_v1 ticket received")
+        }
 
         val tun = establishTunInterface()
         tunInterface = tun
         tunInput = FileInputStream(tun.fileDescriptor)
         tunOutput = FileOutputStream(tun.fileDescriptor)
-        startRelayLoops(openedTransport)
+        startRelayLoops()
         startCounterLogger()
     }
 
@@ -99,10 +101,9 @@ class KrotTunnelSession(
         scope.cancel()
     }
 
-    private fun startRelayLoops(openedTransport: KrotTransportSession) {
+    private fun startRelayLoops() {
         val input = checkNotNull(tunInput)
         val output = checkNotNull(tunOutput)
-        val secure = openedTransport.secureStream
 
         scope.launch {
             val buffer = ByteArray(MAX_PACKET_SIZE)
@@ -151,7 +152,7 @@ class KrotTunnelSession(
                     if (KrotPacketTrace.shouldLog(count)) {
                         log("KRot tun->krot #$count ${packet.size}b ${KrotPacketTrace.describe(packet)}")
                     }
-                    secure.writeFrame(KrotFrameType.Packet, packet)
+                    writeFrameWithResume(KrotFrameType.Packet, packet)
                 }
             } catch (error: Throwable) {
                 reportFailure(error)
@@ -161,7 +162,16 @@ class KrotTunnelSession(
         scope.launch {
             try {
                 while (isActive && !stopped.get()) {
-                    val frame = secure.readFrame()
+                    val activeTransport = transport
+                        ?: throw IOException("KRot transport is unavailable")
+                    val frame = try {
+                        activeTransport.secureStream.readFrame()
+                    } catch (error: Throwable) {
+                        if (stopped.get()) throw error
+                        log("KRot downlink transport lost: ${error.message ?: error::class.java.simpleName}")
+                        if (resumeTransport(activeTransport)) continue
+                        throw error
+                    }
                     when (frame.type) {
                         KrotFrameType.Packet -> {
                             val packet = frame.payload
@@ -183,17 +193,124 @@ class KrotTunnelSession(
                             }
                         }
 
-                        KrotFrameType.Ping -> secure.writeFrame(KrotFrameType.Pong, ByteArray(0))
+                        KrotFrameType.Ping -> writeFrameWithResume(KrotFrameType.Pong, ByteArray(0))
                         KrotFrameType.Pong -> Unit
                         KrotFrameType.Close -> {
                             reportFailure(IllegalStateException("KRot server closed the relay session"))
                             break
                         }
+
+                        KrotFrameType.Resume -> Unit
                     }
                 }
             } catch (error: Throwable) {
                 reportFailure(error)
             }
+        }
+    }
+
+    private fun writeFrameWithResume(type: KrotFrameType, payload: ByteArray) {
+        val activeTransport = transport ?: throw IOException("KRot transport is unavailable")
+        try {
+            activeTransport.secureStream.writeFrame(type, payload)
+        } catch (error: Throwable) {
+            if (stopped.get()) throw error
+            log("KRot uplink transport lost: ${error.message ?: error::class.java.simpleName}")
+            if (!resumeTransport(activeTransport)) throw error
+            val resumedTransport = transport ?: throw IOException("KRot resume did not attach a transport")
+            resumedTransport.secureStream.writeFrame(type, payload)
+        }
+    }
+
+    private fun resumeTransport(failedTransport: KrotTransportSession): Boolean = resumeLock.withLock {
+        if (stopped.get()) return false
+        if (transport !== failedTransport) return transport != null
+
+        val ticket = resumeTicket
+        if (ticket.isNullOrBlank()) {
+            lastError = "KRot server did not issue a session_resume_v1 ticket"
+            log("KRot resume unavailable: no session_resume_v1 ticket")
+            return false
+        }
+
+        transport = null
+        runCatching { failedTransport.close() }
+        val deadline = System.currentTimeMillis() + RESUME_WINDOW_MS
+        var attempt = 0
+        var lastResumeError: Throwable? = null
+        var waitingForNetworkLogged = false
+
+        while (!stopped.get() && System.currentTimeMillis() < deadline) {
+            if (!isNetworkAvailable()) {
+                if (!waitingForNetworkLogged) {
+                    log("KRot transport lost; waiting for a usable Wi-Fi/mobile network")
+                    waitingForNetworkLogged = true
+                }
+                sleepForRetry(attempt)
+                continue
+            }
+
+            waitingForNetworkLogged = false
+            attempt += 1
+            resumeAttempts.incrementAndGet()
+            try {
+                val resumedTransport = openTransport(resumeTicket = ticket, requireResume = true)
+                transport = resumedTransport
+                resumeTicket = resumedTransport.resumeTicket.takeIf { it.isNotBlank() } ?: ticket
+                resumeSuccesses.incrementAndGet()
+                lastError = null
+                log("KRot session resumed after transport loss (attempt $attempt)")
+                return true
+            } catch (error: Throwable) {
+                lastResumeError = error
+                lastError = error.message ?: error::class.java.simpleName
+                log("KRot resume attempt $attempt failed: $lastError")
+                sleepForRetry(attempt)
+            }
+        }
+
+        lastError = "KRot resume window expired" +
+            (lastResumeError?.message?.let { ": $it" } ?: "")
+        log(lastError ?: "KRot resume window expired")
+        false
+    }
+
+    private fun openTransport(resumeTicket: String?, requireResume: Boolean): KrotTransportSession {
+        val rawSocket = Socket()
+        try {
+            rawSocket.bind(null)
+            if (!protectSocket(rawSocket)) {
+                log("KRot socket protect() returned false before connect; continuing with app-level VPN exclusion")
+            } else {
+                log("KRot socket protected before connect")
+            }
+            rawSocket.tcpNoDelay = true
+            rawSocket.connect(InetSocketAddress(spec.server.host, spec.server.port), CONNECT_TIMEOUT_MS)
+            log(
+                if (requireResume) {
+                    "KRot reconnecting TLS cover channel: ${spec.server.host}:${spec.server.port}"
+                } else {
+                    "KRot TCP cover channel established: ${spec.server.host}:${spec.server.port}"
+                }
+            )
+            val opened = KrotProtocol.open(rawSocket, spec, resumeTicket, log)
+            if (requireResume && !opened.resumeAccepted) {
+                opened.close()
+                throw IOException("KRot server did not accept the resume ticket")
+            }
+            return opened
+        } catch (error: Throwable) {
+            runCatching { rawSocket.close() }
+            throw error
+        }
+    }
+
+    private fun sleepForRetry(attempt: Int) {
+        val backoff = minOf(MAX_RESUME_BACKOFF_MS, BASE_RESUME_BACKOFF_MS * (attempt + 1))
+        try {
+            Thread.sleep(backoff)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
         }
     }
 
@@ -223,6 +340,8 @@ class KrotTunnelSession(
                 "tun_write_packets=${tunWritePackets.get()} " +
                 "tun_write_bytes=${tunWriteBytes.get()} " +
                 "dropped_ipv6_packets=${droppedIpv6Packets.get()} " +
+                "resume_attempts=${resumeAttempts.get()} " +
+                "resume_successes=${resumeSuccesses.get()} " +
                 "last_error=${lastError ?: "none"}"
         )
     }
@@ -240,6 +359,9 @@ class KrotTunnelSession(
         const val MAX_PACKET_SIZE: Int = 65_535
         const val DATA_PLANE_IDLE_LOG_MS: Long = 5_000
         const val COUNTER_LOG_INTERVAL_MS: Long = 10_000
+        const val RESUME_WINDOW_MS: Long = 85_000
+        const val BASE_RESUME_BACKOFF_MS: Long = 250
+        const val MAX_RESUME_BACKOFF_MS: Long = 4_000
     }
 }
 
