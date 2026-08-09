@@ -543,7 +543,7 @@ class PrivateVpnService : VpnService() {
         }
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher_source)
+            .setSmallIcon(R.drawable.ic_notification_nora)
             .setContentTitle(getString(R.string.vpn_notification_title, statusLabel))
             .setContentText(getString(R.string.vpn_notification_text, profileLabel))
             .setContentIntent(pendingIntent)

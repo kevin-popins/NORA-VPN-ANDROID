@@ -356,6 +356,7 @@ fun PrivateVpnApp(
                     onToggleSubscriptionCollapse = appViewModel::toggleSubscriptionCollapse,
                     onRefreshSubscription = { appViewModel.refreshSubscription(it, showSuccessMessage = true) },
                     onTransientMessage = appViewModel::emitTransientMessage,
+                    onAddProfile = { navigateToTopLevel(AppDestination.Add) },
                     onOpenProfiles = ::openActiveServerInProfiles
                 )
             }

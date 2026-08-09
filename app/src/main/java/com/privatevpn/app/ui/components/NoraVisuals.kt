@@ -560,7 +560,7 @@ private fun formatDuration(connectedAtMs: Long?): String {
 
 @Composable
 fun NoraWelcomeScene(
-    onOpenProfiles: () -> Unit,
+    onAddProfile: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val transition = rememberInfiniteTransition(label = "nora_welcome_ambient")
@@ -616,7 +616,7 @@ fun NoraWelcomeScene(
             )
             Spacer(Modifier.height(24.dp))
             Button(
-                onClick = onOpenProfiles,
+                onClick = onAddProfile,
                 modifier = Modifier.fillMaxWidth().height(52.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = NoraAmber, contentColor = NoraInk),
                 shape = RoundedCornerShape(14.dp)

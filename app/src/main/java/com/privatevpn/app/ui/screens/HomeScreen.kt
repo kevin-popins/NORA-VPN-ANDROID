@@ -103,7 +103,8 @@ fun HomeScreen(
     onToggleSubscriptionCollapse: (String) -> Unit,
     onRefreshSubscription: (String) -> Unit,
     onTransientMessage: (String) -> Unit,
-    onOpenProfiles: () -> Unit
+    onOpenProfiles: () -> Unit,
+    onAddProfile: () -> Unit = onOpenProfiles
 ) {
     val listState = rememberLazyListState()
     LaunchedEffect(scrollToTopSignal) {
@@ -126,7 +127,7 @@ fun HomeScreen(
     }
 
     if (directProfiles.isEmpty() && subscriptions.isEmpty()) {
-        NoraWelcomeScene(onOpenProfiles = onOpenProfiles)
+        NoraWelcomeScene(onAddProfile = onAddProfile)
         return
     }
 

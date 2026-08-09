@@ -1,8 +1,10 @@
-<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-    <item
-        android:drawable="@drawable/nora_logo"
-        android:left="26dp"
-        android:top="26dp"
-        android:right="26dp"
-        android:bottom="26dp" />
-</layer-list>
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFF9F1C"
+        android:pathData="M34,78L34,30L44,30L64,61L64,30L74,30L74,78L64,78L44,47L44,78Z" />
+</vector>

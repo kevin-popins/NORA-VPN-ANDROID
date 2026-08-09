@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="app/src/main/res/drawable-nodpi/nora_logo.png" width="112" alt="NORA VPN logo">
+  <img src="app/src/main/res/raw/nora_logo.svg" width="112" alt="NORA VPN logo">
   <h1>NORA VPN</h1>
   <p>A visual-first Android VPN client with KRot, VLESS/REALITY and AmneziaWG 2.0.</p>
 
