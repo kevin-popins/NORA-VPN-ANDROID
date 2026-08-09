@@ -40,9 +40,12 @@ sealed class AppDestination(
     data object Settings : AppDestination("settings", R.string.nav_settings, R.string.nav_settings, true, Icons.Filled.Settings)
 
     companion object {
-        val all = listOf(Home, Profiles, Add, Traffic, PrivateSession, Logs, Dns, Settings)
-        val bottomBarItems = all.filter { it.showInBottomBar }
-        val topLevelItems = bottomBarItems
+        val all: List<AppDestination> by lazy {
+            listOf(Home, Profiles, Add, Traffic, PrivateSession, Logs, Dns, Settings)
+        }
+        val bottomBarItems: List<AppDestination> by lazy { all.filter { it.showInBottomBar } }
+        val topLevelItems: List<AppDestination>
+            get() = bottomBarItems
 
         fun fromRoute(route: String?): AppDestination =
             fromRouteOrNull(route) ?: Home

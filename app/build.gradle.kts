@@ -1,9 +1,34 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.devtools.ksp")
 }
+
+val noraLocalProperties = Properties().apply {
+    val propertiesFile = rootProject.file("local.properties")
+    if (propertiesFile.isFile) {
+        propertiesFile.inputStream().use(::load)
+    }
+}
+
+fun noraSigningValue(name: String): String? =
+    providers.gradleProperty(name).orNull
+        ?: System.getenv(name)
+        ?: noraLocalProperties.getProperty(name)
+
+val noraSigningStoreFile = noraSigningValue("NORA_SIGNING_STORE_FILE")
+val noraSigningStorePassword = noraSigningValue("NORA_SIGNING_STORE_PASSWORD")
+val noraSigningKeyAlias = noraSigningValue("NORA_SIGNING_KEY_ALIAS")
+val noraSigningKeyPassword = noraSigningValue("NORA_SIGNING_KEY_PASSWORD")
+val noraSigningReady = listOf(
+    noraSigningStoreFile,
+    noraSigningStorePassword,
+    noraSigningKeyAlias,
+    noraSigningKeyPassword
+).all { !it.isNullOrBlank() } && rootProject.file(noraSigningStoreFile.orEmpty()).isFile
 
 android {
     namespace = "com.privatevpn.app"
@@ -19,13 +44,29 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        if (noraSigningReady) {
+            create("nora") {
+                storeFile = rootProject.file(noraSigningStoreFile.orEmpty())
+                storePassword = noraSigningStorePassword
+                keyAlias = noraSigningKeyAlias
+                keyPassword = noraSigningKeyPassword
+                storeType = "PKCS12"
+            }
+        }
+    }
+
     buildTypes {
+        getByName("debug") {
+            signingConfigs.findByName("nora")?.let { signingConfig = it }
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            signingConfigs.findByName("nora")?.let { signingConfig = it }
         }
     }
 

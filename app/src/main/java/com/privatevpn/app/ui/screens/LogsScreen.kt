@@ -3,6 +3,7 @@ package com.privatevpn.app.ui.screens
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -29,9 +30,8 @@ fun LogsScreen(
     levelToLabel: @Composable (LogLevel) -> String
 ) {
     LazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(AppSpacing.md),
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(AppSpacing.md),
         verticalArrangement = Arrangement.spacedBy(AppSpacing.sm)
     ) {
         if (logs.isEmpty()) {

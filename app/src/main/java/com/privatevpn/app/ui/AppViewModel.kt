@@ -63,18 +63,23 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -139,8 +144,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val _systemVpnIntegrationState = MutableStateFlow(SystemVpnIntegrationState())
     private val _notificationPermissionGranted = MutableStateFlow(true)
     private val _transientMessage = MutableStateFlow<String?>(null)
+    private val _addContentEvents = Channel<AddContentEvent>(capacity = Channel.BUFFERED)
     private val _serverPingResults = MutableStateFlow<Map<String, String>>(emptyMap())
     private val _pingInProgress = MutableStateFlow(false)
+
+    val addContentEvents = _addContentEvents.receiveAsFlow()
 
     private var logCounter: Long = 0
     private var lastRuntimeErrorLogged: String? = null
@@ -704,14 +712,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun importProfileFromAddScreen(rawInput: String) {
+        viewModelScope.launch {
+            importProfileInternal(
+                rawInput = rawInput,
+                sourceLabel = "текст",
+                reportToAddScreen = true
+            )
+        }
+    }
+
     fun importProfileFromFile(uri: Uri) {
         viewModelScope.launch {
-            val rawInput = runCatching {
-                val resolver = getApplication<Application>().contentResolver
-                val text = resolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
-                    ?: throw IllegalStateException("Файл пустой или недоступен")
-                text
-            }.getOrElse { error ->
+            val rawInput = readProfileFile(uri).getOrElse { error ->
                 handleError(
                     userMessage = "Не удалось прочитать файл профиля",
                     error = error,
@@ -722,6 +735,33 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
             importProfileInternal(rawInput = rawInput, sourceLabel = "файл")
         }
+    }
+
+    fun importProfileFromFileFromAddScreen(uri: Uri) {
+        viewModelScope.launch {
+            val rawInput = readProfileFile(uri).getOrElse { error ->
+                emitAddContentFailure(
+                    AppErrors.fromThrowable(
+                        error = error,
+                        fallbackCode = AppErrorCode.IMPORT_001,
+                        fallbackUserMessage = "Не удалось прочитать файл профиля"
+                    )
+                )
+                return@launch
+            }
+
+            importProfileInternal(
+                rawInput = rawInput,
+                sourceLabel = "файл",
+                reportToAddScreen = true
+            )
+        }
+    }
+
+    private fun readProfileFile(uri: Uri): Result<String> = runCatching {
+        val resolver = getApplication<Application>().contentResolver
+        resolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+            ?: throw IllegalStateException("Файл пустой или недоступен")
     }
 
     fun importExternalIntent(intent: Intent) {
@@ -750,20 +790,47 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private suspend fun addSubscriptionInternal(sourceUrl: String, displayName: String?) {
+    fun addSubscriptionFromAddScreen(sourceUrl: String, displayName: String?) {
+        viewModelScope.launch(Dispatchers.IO) {
+            addSubscriptionInternal(
+                sourceUrl = sourceUrl,
+                displayName = displayName,
+                reportToAddScreen = true
+            )
+        }
+    }
+
+    private suspend fun addSubscriptionInternal(
+        sourceUrl: String,
+        displayName: String?,
+        reportToAddScreen: Boolean = false
+    ) {
         runCatching {
             subscriptionRepository.addSubscription(sourceUrl = sourceUrl, displayName = displayName)
         }.onSuccess { source ->
             addLog(LogLevel.INFO, "Подписка '${source.displayName}' добавлена")
-            emitTransientMessage("Подписка '${source.displayName}' добавлена")
+            val message = "Подписка '${source.displayName}' добавлена"
+            if (reportToAddScreen) {
+                _addContentEvents.send(
+                    AddContentEvent.Success(
+                        target = AddedServerTarget.Subscription(source.id),
+                        message = message
+                    )
+                )
+            } else {
+                emitTransientMessage(message)
+            }
             refreshSubscription(source.id, showSuccessMessage = false)
             SubscriptionUpdateWorker.schedule(getApplication<Application>().applicationContext)
         }.onFailure { error ->
-            applyUiError(
-                AppErrors.subscriptionAddFailed(
-                    technicalReason = error.message
-                )
+            val appError = AppErrors.subscriptionAddFailed(
+                technicalReason = error.message
             )
+            if (reportToAddScreen) {
+                emitAddContentFailure(appError)
+            } else {
+                applyUiError(appError)
+            }
         }
     }
 
@@ -1221,30 +1288,34 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun pingAllServers() {
         if (_pingInProgress.value) return
-
-        val snapshotProfiles = uiState.value.profiles
-        if (snapshotProfiles.isEmpty()) {
-            emitTransientMessage("Нет серверов для проверки пинга")
-            return
-        }
-
         _pingInProgress.value = true
-        _serverPingResults.value = snapshotProfiles.associate { it.id to "…" }
 
         viewModelScope.launch {
-            val results = withContext(Dispatchers.IO) {
-                snapshotProfiles
-                    .map { profile ->
-                        async {
-                            val pingText = measureProfilePing(profile)
-                            profile.id to pingText
+            try {
+                val snapshotProfiles = profilesRepository.profiles.first()
+                if (snapshotProfiles.isEmpty()) {
+                    emitTransientMessage("Нет серверов для проверки пинга")
+                    return@launch
+                }
+
+                _serverPingResults.value = snapshotProfiles.associate { it.id to "…" }
+                val results = withContext(Dispatchers.IO) {
+                    val concurrency = Semaphore(permits = 6)
+                    snapshotProfiles
+                        .map { profile ->
+                            async {
+                                concurrency.withPermit {
+                                    profile.id to measureProfilePing(profile)
+                                }
+                            }
                         }
-                    }
-                    .awaitAll()
-                    .toMap()
+                        .awaitAll()
+                        .toMap()
+                }
+                _serverPingResults.value = results
+            } finally {
+                _pingInProgress.value = false
             }
-            _serverPingResults.value = results
-            _pingInProgress.value = false
         }
     }
 
@@ -1667,6 +1738,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private suspend fun emitAddContentFailure(appError: AppError) {
+        addLog(LogLevel.ERROR, appError.toLogMessage())
+        _addContentEvents.send(AddContentEvent.Failure(appError.toUiMessage()))
+    }
+
     private fun handleError(
         userMessage: String,
         error: Throwable,
@@ -1697,23 +1773,36 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private suspend fun importProfileInternal(rawInput: String, sourceLabel: String) {
+    private suspend fun importProfileInternal(
+        rawInput: String,
+        sourceLabel: String,
+        reportToAddScreen: Boolean = false
+    ) {
         runCatching {
             val parsed = profileImportParser.parse(rawInput)
             persistImportedDraft(parsed)
         }.onSuccess { imported ->
-            handleImportedProfileSuccess(imported = imported, sourceLabel = sourceLabel)
+            handleImportedProfileSuccess(
+                imported = imported,
+                sourceLabel = sourceLabel,
+                reportToAddScreen = reportToAddScreen
+            )
         }.onFailure { error ->
             val isUnsupportedFormat = error.message
                 ?.contains("Неподдерживаемый формат профиля", ignoreCase = true) == true
-            if (isUnsupportedFormat) {
-                applyUiError(AppErrors.profileUnsupported(error.message))
+            val appError = if (isUnsupportedFormat) {
+                AppErrors.profileUnsupported(error.message)
             } else {
-                handleError(
-                    userMessage = "Ошибка импорта профиля",
+                AppErrors.fromThrowable(
                     error = error,
-                    fallbackCode = AppErrorCode.IMPORT_001
+                    fallbackCode = AppErrorCode.IMPORT_001,
+                    fallbackUserMessage = "Ошибка импорта профиля"
                 )
+            }
+            if (reportToAddScreen) {
+                emitAddContentFailure(appError)
+            } else {
+                applyUiError(appError)
             }
         }
     }
@@ -1792,7 +1881,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         return profile
     }
 
-    private suspend fun handleImportedProfileSuccess(imported: VpnProfile, sourceLabel: String) {
+    private suspend fun handleImportedProfileSuccess(
+        imported: VpnProfile,
+        sourceLabel: String,
+        reportToAddScreen: Boolean = false
+    ) {
         val settingsSnapshot = uiState.value.settingsState
         if (settingsSnapshot.activeProfileId == null) {
             userSettingsRepository.setActiveProfile(imported.id)
@@ -1804,12 +1897,22 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (imported.dnsFallbackApplied) {
             addLog(LogLevel.INFO, "Для профиля '${imported.displayName}' подставлен DNS по умолчанию")
         }
-        if (imported.isPartialImport) {
+        val message = if (imported.isPartialImport) {
             addLog(LogLevel.INFO, "Профиль '${imported.displayName}' импортирован частично")
             imported.importWarnings.forEach { warning -> addLog(LogLevel.INFO, warning) }
-            emitTransientMessage("Профиль '${imported.displayName}' добавлен частично")
+            "Профиль '${imported.displayName}' добавлен частично"
         } else {
-            emitTransientMessage("Профиль '${imported.displayName}' успешно добавлен")
+            "Профиль '${imported.displayName}' успешно добавлен"
+        }
+        if (reportToAddScreen) {
+            _addContentEvents.send(
+                AddContentEvent.Success(
+                    target = AddedServerTarget.Profile(imported.id),
+                    message = message
+                )
+            )
+        } else {
+            emitTransientMessage(message)
         }
     }
 
@@ -2099,19 +2202,35 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val endpoint = resolveProfileEndpoint(profile) ?: return "—"
         if (endpoint.host.isBlank() || endpoint.port !in 1..65535) return "—"
 
-        return runCatching {
-            val startedAtNs = System.nanoTime()
-            Socket().use { socket ->
-                socket.connect(InetSocketAddress(endpoint.host, endpoint.port), 1_500)
-            }
-            val elapsedMs = (System.nanoTime() - startedAtNs) / 1_000_000L
-            "${elapsedMs.coerceAtLeast(1L)} мс"
-        }.getOrElse { throwable ->
-            when (throwable) {
-                is SocketTimeoutException -> "timeout"
-                else -> "—"
+        val addresses = runCatching {
+            InetAddress.getAllByName(endpoint.host)
+                .filterIsInstance<Inet4Address>()
+                .distinctBy(InetAddress::getHostAddress)
+                .take(4)
+        }.getOrElse {
+            return "dns err"
+        }
+        if (addresses.isEmpty()) return "—"
+
+        var fastestMs: Long? = null
+        var timedOut = false
+        addresses.forEach { address ->
+            try {
+                val startedAtNs = System.nanoTime()
+                Socket().use { socket ->
+                    socket.tcpNoDelay = true
+                    socket.connect(InetSocketAddress(address, endpoint.port), 2_500)
+                }
+                val elapsedMs = ((System.nanoTime() - startedAtNs) / 1_000_000L).coerceAtLeast(1L)
+                fastestMs = fastestMs?.coerceAtMost(elapsedMs) ?: elapsedMs
+            } catch (_: SocketTimeoutException) {
+                timedOut = true
+            } catch (_: Exception) {
+                // Try the remaining IPv4 candidates before marking the endpoint offline.
             }
         }
+
+        return fastestMs?.let { "$it мс" } ?: if (timedOut) "timeout" else "—"
     }
 
     private fun measureAwgReachabilityPing(profile: VpnProfile, endpoint: ProfileEndpoint): String {

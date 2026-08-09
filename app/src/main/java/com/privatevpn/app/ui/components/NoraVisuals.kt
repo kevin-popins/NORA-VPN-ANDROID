@@ -644,6 +644,9 @@ private fun noraLocationPhotoIds(context: android.content.Context, profileName: 
         normalized.contains("испан") || normalized.contains("spain") -> listOf("spain")
         normalized.contains("эстон") || normalized.contains("estonia") -> listOf("estonia")
         normalized.contains("литв") || normalized.contains("lithuania") -> listOf("lithuania1", "lithuania2", "lithuania3")
+        normalized.contains("польш") || normalized.contains("poland") || normalized.contains("polska") ||
+            normalized.contains("варшав") || normalized.contains("warsaw") ||
+            normalized.contains("краков") || normalized.contains("krakow") -> listOf("poland1", "poland2", "poland3")
         else -> listOf("universal")
     }
     return names.mapNotNull { name ->
@@ -658,5 +661,8 @@ private fun noraCountryLabel(profileName: String): String = when {
     profileName.contains("росси", true) || profileName.contains("москва", true) || profileName.contains("russia", true) -> "Россия"
     profileName.contains("финлянд", true) || profileName.contains("finland", true) -> "Финляндия"
     profileName.contains("сша", true) || profileName.contains("usa", true) -> "США"
+    profileName.contains("польш", true) || profileName.contains("poland", true) || profileName.contains("polska", true) ||
+        profileName.contains("варшав", true) || profileName.contains("warsaw", true) ||
+        profileName.contains("краков", true) || profileName.contains("krakow", true) -> "Польша"
     else -> "Без региона"
 }

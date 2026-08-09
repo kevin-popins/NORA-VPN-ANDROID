@@ -107,6 +107,9 @@ fun ProfilesScreen(
     errorMessage: String?,
     scrollToTopSignal: Int,
     focusActiveSignal: Int,
+    addedProfileFocusId: String?,
+    addedSubscriptionFocusId: String?,
+    onAddedItemFocusConsumed: () -> Unit,
     socksSettings: SocksSettings,
     splitTunnelingEnabled: Boolean,
     onImportProfile: (String) -> Unit,
@@ -184,6 +187,58 @@ fun ProfilesScreen(
         }
     }
 
+    LaunchedEffect(
+        addedProfileFocusId,
+        addedSubscriptionFocusId,
+        profiles,
+        subscriptions,
+        showImportPanel,
+        showSubscriptionPanel,
+        errorMessage
+    ) {
+        if (addedProfileFocusId == null && addedSubscriptionFocusId == null) {
+            return@LaunchedEffect
+        }
+
+        val addedProfile = addedProfileFocusId?.let { id ->
+            profiles.firstOrNull { it.id == id }
+        }
+        if (addedProfileFocusId != null && addedProfile == null) {
+            return@LaunchedEffect
+        }
+
+        val targetSubscriptionId = addedSubscriptionFocusId ?: addedProfile?.parentSubscriptionId
+        if (targetSubscriptionId != null) {
+            val subscriptionIndex = subscriptions.indexOfFirst { it.id == targetSubscriptionId }
+            if (subscriptionIndex < 0) {
+                return@LaunchedEffect
+            }
+            val subscription = subscriptions[subscriptionIndex]
+            if (subscription.isCollapsed) {
+                onToggleSubscriptionCollapse(subscription.id)
+                return@LaunchedEffect
+            }
+            listState.animateScrollToItem(subscriptionIndex + 2)
+            onAddedItemFocusConsumed()
+            return@LaunchedEffect
+        }
+
+        val directProfileIndex = regularProfiles.indexOfFirst { it.id == addedProfileFocusId }
+        if (directProfileIndex < 0) {
+            return@LaunchedEffect
+        }
+        var directHeaderIndex = 1
+        if (subscriptions.isNotEmpty()) {
+            directHeaderIndex += subscriptions.size + 1
+        }
+        if (showImportPanel) directHeaderIndex += 1
+        if (showSubscriptionPanel) directHeaderIndex += 1
+        if (!errorMessage.isNullOrBlank()) directHeaderIndex += 1
+
+        listState.animateScrollToItem(directHeaderIndex + directProfileIndex + 1)
+        onAddedItemFocusConsumed()
+    }
+
     LazyColumn(
         state = listState,
         modifier = Modifier.fillMaxSize(),
@@ -226,6 +281,7 @@ fun ProfilesScreen(
                     source = source,
                     profiles = childrenBySubscription[source.id].orEmpty(),
                     activeProfileId = activeProfileId,
+                    serverPingResults = serverPingResults,
                     refreshing = refreshingSubscriptionIds.contains(source.id),
                     onToggleCollapse = { onToggleSubscriptionCollapse(source.id) },
                     onRefresh = { onRefreshSubscription(source.id) },
@@ -491,6 +547,7 @@ private fun SubscriptionCard(
     source: SubscriptionSource,
     profiles: List<VpnProfile>,
     activeProfileId: String?,
+    serverPingResults: Map<String, String>,
     refreshing: Boolean,
     onToggleCollapse: () -> Unit,
     onRefresh: () -> Unit,
@@ -758,6 +815,7 @@ private fun SubscriptionCard(
                             SubscriptionChildProfileRow(
                                 profile = profile,
                                 activeProfileId = activeProfileId,
+                                pingText = serverPingResults[profile.id],
                                 onSelectProfile = onSelectProfile
                             )
                         }
@@ -772,6 +830,7 @@ private fun SubscriptionCard(
 private fun SubscriptionChildProfileRow(
     profile: VpnProfile,
     activeProfileId: String?,
+    pingText: String?,
     onSelectProfile: (String) -> Unit
 ) {
     Surface(
@@ -804,6 +863,15 @@ private fun SubscriptionChildProfileRow(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+            pingText?.let { value ->
+                Text(
+                    text = value,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = NoraAmber,
+                    modifier = Modifier.padding(start = AppSpacing.xs),
+                    maxLines = 1
+                )
+            }
         }
     }
 }
