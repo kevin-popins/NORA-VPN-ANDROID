@@ -63,10 +63,17 @@ import com.privatevpn.app.profiles.model.SubscriptionSyncStatus
 import com.privatevpn.app.profiles.model.VpnProfile
 import com.privatevpn.app.ui.components.AppSection
 import com.privatevpn.app.ui.components.InlineStatusLabel
+import com.privatevpn.app.ui.components.NoraActiveServerCard
+import com.privatevpn.app.ui.components.NoraChangeServerCard
+import com.privatevpn.app.ui.components.NoraHomeHero
+import com.privatevpn.app.ui.components.NoraHomeLoadingScene
+import com.privatevpn.app.ui.components.NoraTrafficWaitingPanel
+import com.privatevpn.app.ui.components.NoraWelcomeScene
 import com.privatevpn.app.ui.components.SectionTone
 import com.privatevpn.app.ui.components.softClickable
 import com.privatevpn.app.ui.theme.AppSpacing
 import com.privatevpn.app.vpn.VpnConnectionStatus
+import com.privatevpn.app.vpn.VpnTrafficState
 import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -75,6 +82,8 @@ import java.util.Locale
 @Composable
 fun HomeScreen(
     vpnStatus: VpnConnectionStatus,
+    traffic: VpnTrafficState,
+    profilesLoaded: Boolean,
     connectionErrorMessage: String?,
     activeProfileName: String?,
     protocolLabel: String,
@@ -93,10 +102,10 @@ fun HomeScreen(
     onSetActiveProfile: (String) -> Unit,
     onToggleSubscriptionCollapse: (String) -> Unit,
     onRefreshSubscription: (String) -> Unit,
-    onTransientMessage: (String) -> Unit
+    onTransientMessage: (String) -> Unit,
+    onOpenProfiles: () -> Unit
 ) {
     val listState = rememberLazyListState()
-    var isIpVisible by rememberSaveable(activeProfileId) { mutableStateOf(false) }
     LaunchedEffect(scrollToTopSignal) {
         if (scrollToTopSignal > 0) {
             listState.animateScrollToItem(0)
@@ -111,20 +120,28 @@ fun HomeScreen(
             .mapValues { (_, value) -> value.sortedBy { it.sourceOrder } }
     }
 
-    val statusText = when (vpnStatus) {
-        VpnConnectionStatus.NO_PERMISSION -> stringResource(R.string.home_status_no_permission)
-        VpnConnectionStatus.READY -> stringResource(R.string.home_status_ready)
-        VpnConnectionStatus.CONNECTING -> stringResource(R.string.home_status_connecting)
-        VpnConnectionStatus.CONNECTED -> stringResource(R.string.home_status_connected)
-        VpnConnectionStatus.ERROR -> stringResource(R.string.home_status_error)
+    if (!profilesLoaded) {
+        NoraHomeLoadingScene()
+        return
+    }
+
+    if (directProfiles.isEmpty() && subscriptions.isEmpty()) {
+        NoraWelcomeScene(onOpenProfiles = onOpenProfiles)
+        return
+    }
+
+    val statusText = if (vpnStatus == VpnConnectionStatus.CONNECTED) {
+        formatHomeDuration(traffic.connectedAtMs)
+    } else {
+        "00:00:00"
     }
 
     val primaryButtonLabel = when (vpnStatus) {
-        VpnConnectionStatus.NO_PERMISSION -> stringResource(R.string.home_request_vpn_permission)
-        VpnConnectionStatus.CONNECTED,
-        VpnConnectionStatus.CONNECTING -> stringResource(R.string.button_disconnect)
+        VpnConnectionStatus.NO_PERMISSION -> "Разрешить VPN"
+        VpnConnectionStatus.CONNECTED -> "Подключено"
+        VpnConnectionStatus.CONNECTING -> "Подключение"
         VpnConnectionStatus.READY,
-        VpnConnectionStatus.ERROR -> stringResource(R.string.button_connect)
+        VpnConnectionStatus.ERROR -> "Подключить"
     }
 
     val onPrimaryAction = when (vpnStatus) {
@@ -135,6 +152,35 @@ fun HomeScreen(
         VpnConnectionStatus.ERROR -> onConnectClick
     }
 
+    // Home is deliberately a fixed connection scene. Detailed traffic lives on its own tab.
+    Column(
+        modifier = Modifier.fillMaxSize().padding(AppSpacing.md),
+        verticalArrangement = Arrangement.spacedBy(AppSpacing.md)
+    ) {
+        NoraHomeHero(
+            vpnStatus = vpnStatus,
+            actionLabel = primaryButtonLabel,
+            statusLabel = statusText,
+            onAction = onPrimaryAction
+        )
+        NoraActiveServerCard(
+            profileName = activeProfileName ?: stringResource(R.string.home_profile_not_selected),
+            protocolLabel = protocolLabel,
+            endpoint = serverAddress,
+            vpnStatus = vpnStatus,
+            onClick = onOpenProfiles
+        )
+        NoraChangeServerCard(onClick = onOpenProfiles)
+        if (!connectionErrorMessage.isNullOrBlank()) {
+            Text(
+                text = stringResource(R.string.home_error_prefix, connectionErrorMessage),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error
+            )
+        }
+    }
+    return
+
     LazyColumn(
         state = listState,
         modifier = Modifier.fillMaxSize(),
@@ -142,62 +188,24 @@ fun HomeScreen(
         verticalArrangement = Arrangement.spacedBy(AppSpacing.md)
     ) {
         item(key = "status_card") {
-            AppSection(tone = SectionTone.Primary) {
-                Text(
-                    text = activeProfileName ?: stringResource(R.string.home_profile_not_selected),
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.SemiBold
+            Column(verticalArrangement = Arrangement.spacedBy(AppSpacing.md)) {
+                NoraHomeHero(
+                    vpnStatus = vpnStatus,
+                    actionLabel = primaryButtonLabel,
+                    statusLabel = statusText,
+                    onAction = onPrimaryAction
                 )
-                Text(
-                    text = statusText,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = when (vpnStatus) {
-                        VpnConnectionStatus.ERROR -> MaterialTheme.colorScheme.error
-                        VpnConnectionStatus.CONNECTED -> MaterialTheme.colorScheme.primary
-                        else -> MaterialTheme.colorScheme.onSurface
-                    }
+                NoraActiveServerCard(
+                    profileName = activeProfileName ?: stringResource(R.string.home_profile_not_selected),
+                    protocolLabel = protocolLabel,
+                    endpoint = serverAddress,
+                    vpnStatus = vpnStatus,
+                    onClick = onOpenProfiles
                 )
-                Text(
-                    text = stringResource(R.string.home_protocol_inline, protocolLabel),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                NoraTrafficWaitingPanel(
+                    traffic = traffic,
+                    connected = vpnStatus == VpnConnectionStatus.CONNECTED
                 )
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(AppSpacing.xxs)
-                ) {
-                    val resolvedIp = serverAddress?.trim().takeUnless { it.isNullOrBlank() }
-                    val visibleIp = resolvedIp ?: stringResource(R.string.home_info_ip_unknown)
-                    val hiddenIp = stringResource(R.string.home_ip_hidden_mask)
-                    Text(
-                        text = stringResource(
-                            R.string.home_ip_inline,
-                            if (isIpVisible || resolvedIp == null) visibleIp else hiddenIp
-                        ),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    if (resolvedIp != null) {
-                        IconButton(
-                            onClick = { isIpVisible = !isIpVisible },
-                            modifier = Modifier.size(28.dp)
-                        ) {
-                            Icon(
-                                imageVector = if (isIpVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                contentDescription = if (isIpVisible) {
-                                    stringResource(R.string.home_ip_hide)
-                                } else {
-                                    stringResource(R.string.home_ip_show)
-                                },
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                }
                 if (!connectionErrorMessage.isNullOrBlank()) {
                     Text(
                         text = stringResource(R.string.home_error_prefix, connectionErrorMessage),
@@ -206,14 +214,6 @@ fun HomeScreen(
                     )
                 }
             }
-        }
-
-        item(key = "connect_button") {
-            ConnectionActionButton(
-                vpnStatus = vpnStatus,
-                label = primaryButtonLabel,
-                onClick = onPrimaryAction
-            )
         }
 
         item(key = "servers_header") {
@@ -302,6 +302,11 @@ fun HomeScreen(
             }
         }
     }
+}
+
+private fun formatHomeDuration(connectedAtMs: Long?): String {
+    val seconds = connectedAtMs?.let { ((System.currentTimeMillis() - it) / 1_000L).coerceAtLeast(0L) } ?: 0L
+    return "%02d:%02d:%02d".format(seconds / 3_600L, (seconds / 60L) % 60L, seconds % 60L)
 }
 
 @Composable

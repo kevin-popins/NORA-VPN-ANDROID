@@ -73,6 +73,7 @@ temp/
 *.tmp
 .tmp-nested-wrapper.jar
 tun2proxy-android-libs.zip
+NORA desktop/runtime/
 
 # Local gradle helper folders
 .gradle-local*/

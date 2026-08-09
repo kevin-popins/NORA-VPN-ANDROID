@@ -8,6 +8,7 @@ class VpnManager(private val controller: VpnController) {
     val status: StateFlow<VpnConnectionStatus> = controller.status
     val runtimeError: StateFlow<String?> = controller.runtimeError
     val appTrafficMode: StateFlow<AppTrafficMode> = controller.appTrafficMode
+    val traffic: StateFlow<VpnTrafficState> = VpnRuntimeStateStore.traffic
 
     fun getPrepareIntent(): Intent? = controller.getPrepareIntent()
 

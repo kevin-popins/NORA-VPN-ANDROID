@@ -22,9 +22,9 @@
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
-        android:icon="@mipmap/ic_launcher_source"
+        android:icon="@mipmap/nora_launcher"
         android:label="@string/app_name"
-        android:roundIcon="@mipmap/ic_launcher_source_round"
+        android:roundIcon="@mipmap/nora_launcher"
         android:supportsRtl="true"
         android:theme="@style/Theme.PrivateVPN">
         <activity

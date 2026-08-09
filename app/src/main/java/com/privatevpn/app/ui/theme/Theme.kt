@@ -1,10 +1,10 @@
 package com.privatevpn.app.ui.theme
 
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.lightColorScheme
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 
-private val LightColorScheme = lightColorScheme(
+private val NoraDarkColorScheme = darkColorScheme(
     primary = AppAccent,
     onPrimary = AppSurface,
     primaryContainer = AppAccentPressed,
@@ -27,7 +27,7 @@ fun PrivateVpnTheme(
     content: @Composable () -> Unit
 ) {
     MaterialTheme(
-        colorScheme = LightColorScheme,
+        colorScheme = NoraDarkColorScheme,
         typography = Typography,
         shapes = AppShapes,
         content = content

@@ -9,8 +9,11 @@ import com.privatevpn.app.settings.SettingsState
 import com.privatevpn.app.vpn.PrivateSessionState
 import com.privatevpn.app.vpn.AppTrafficMode
 import com.privatevpn.app.vpn.VpnConnectionStatus
+import com.privatevpn.app.vpn.VpnTrafficState
+import com.privatevpn.app.vpn.VpnSessionRecord
 
 data class AppUiState(
+    val profilesLoaded: Boolean = false,
     val vpnStatus: VpnConnectionStatus = VpnConnectionStatus.NO_PERMISSION,
     val profiles: List<VpnProfile> = emptyList(),
     val subscriptions: List<SubscriptionSource> = emptyList(),
@@ -27,6 +30,8 @@ data class AppUiState(
     val settingsState: SettingsState = SettingsState(),
     val dnsState: DnsState = DnsState(),
     val appTrafficMode: AppTrafficMode = AppTrafficMode.UNKNOWN,
+    val traffic: VpnTrafficState = VpnTrafficState(),
+    val sessionHistory: List<VpnSessionRecord> = emptyList(),
     val notificationPermission: NotificationPermissionUiState = NotificationPermissionUiState(),
     val transientMessage: String? = null
 )

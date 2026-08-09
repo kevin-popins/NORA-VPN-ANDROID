@@ -3,13 +3,17 @@ package com.privatevpn.app.ui.screens
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -21,18 +25,24 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedIconButton
 import androidx.compose.material3.OutlinedTextField
@@ -42,7 +52,11 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -55,6 +69,9 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.privatevpn.app.R
 import com.privatevpn.app.profiles.model.ProfileType
@@ -68,10 +85,15 @@ import com.privatevpn.app.ui.components.InlineStatusLabel
 import com.privatevpn.app.ui.components.SectionTone
 import com.privatevpn.app.ui.components.softClickable
 import com.privatevpn.app.ui.theme.AppSpacing
+import com.privatevpn.app.ui.theme.NoraAmber
+import com.privatevpn.app.ui.theme.NoraDanger
+import com.privatevpn.app.ui.theme.NoraInkElevated
+import com.privatevpn.app.ui.theme.NoraLine
+import com.privatevpn.app.ui.theme.NoraMuted
+import com.privatevpn.app.ui.theme.NoraText
 import org.json.JSONObject
 import java.text.DateFormat
 import java.util.Date
-import java.net.URL
 import java.util.Locale
 
 @Composable
@@ -80,8 +102,11 @@ fun ProfilesScreen(
     subscriptions: List<SubscriptionSource>,
     refreshingSubscriptionIds: Set<String>,
     activeProfileId: String?,
+    serverPingResults: Map<String, String>,
+    pingInProgress: Boolean,
     errorMessage: String?,
     scrollToTopSignal: Int,
+    focusActiveSignal: Int,
     socksSettings: SocksSettings,
     splitTunnelingEnabled: Boolean,
     onImportProfile: (String) -> Unit,
@@ -89,6 +114,7 @@ fun ProfilesScreen(
     onAddSubscription: (sourceUrl: String, displayName: String?) -> Unit,
     onRefreshSubscription: (subscriptionId: String) -> Unit,
     onRefreshAllSubscriptions: () -> Unit,
+    onPingAllServers: () -> Unit,
     onToggleSubscriptionCollapse: (subscriptionId: String) -> Unit,
     onRenameSubscription: (subscriptionId: String, displayName: String) -> Unit,
     onDeleteSubscription: (subscriptionId: String) -> Unit,
@@ -120,10 +146,41 @@ fun ProfilesScreen(
     var renameSubscription by remember { mutableStateOf<SubscriptionSource?>(null) }
     var editIntervalSubscription by remember { mutableStateOf<SubscriptionSource?>(null) }
     var deleteSubscription by remember { mutableStateOf<SubscriptionSource?>(null) }
+    var handledFocusSignal by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(scrollToTopSignal) {
         if (scrollToTopSignal > 0) {
             listState.animateScrollToItem(0)
+        }
+    }
+
+    LaunchedEffect(focusActiveSignal, activeProfileId, profiles, subscriptions) {
+        if (
+            focusActiveSignal <= 0 ||
+            focusActiveSignal == handledFocusSignal ||
+            activeProfileId == null
+        ) return@LaunchedEffect
+        val activeProfile = profiles.firstOrNull { it.id == activeProfileId } ?: return@LaunchedEffect
+        val parentSubscriptionId = activeProfile.parentSubscriptionId
+        val parentSubscription = parentSubscriptionId?.let { id ->
+            subscriptions.firstOrNull { it.id == id }
+        }
+        if (parentSubscriptionId != null && parentSubscription?.isCollapsed == true) {
+            return@LaunchedEffect
+        }
+        val targetIndex = if (parentSubscriptionId != null) {
+            subscriptions.indexOfFirst { it.id == parentSubscriptionId }
+                .takeIf { it >= 0 }
+                ?.plus(2)
+        } else {
+            val directHeaderIndex = 1 + if (subscriptions.isEmpty()) 0 else subscriptions.size + 1
+            regularProfiles.indexOfFirst { it.id == activeProfileId }
+                .takeIf { it >= 0 }
+                ?.plus(directHeaderIndex + 1)
+        }
+        targetIndex?.let {
+            listState.animateScrollToItem(it)
+            handledFocusSignal = focusActiveSignal
         }
     }
 
@@ -135,59 +192,52 @@ fun ProfilesScreen(
     ) {
         item {
             Text(
-                text = stringResource(R.string.profiles_title),
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.SemiBold
+                text = "Серверы",
+                style = MaterialTheme.typography.headlineMedium,
+                color = NoraText,
+                fontWeight = FontWeight.Bold
             )
         }
 
-        item {
-            AppSection(tone = SectionTone.Secondary) {
-                Text(
-                    text = stringResource(R.string.profiles_summary_title),
-                    style = MaterialTheme.typography.titleSmall
-                )
-                Text(
-                    text = stringResource(
-                        R.string.profiles_summary_active,
-                        profiles.firstOrNull { it.id == activeProfileId }?.displayName
-                            ?: stringResource(R.string.home_profile_not_selected)
-                    ),
-                    style = MaterialTheme.typography.bodySmall
-                )
-                Text(
-                    text = stringResource(
-                        R.string.profiles_socks_status,
-                        socksStatusLabel(socksSettings, splitTunnelingEnabled)
-                    ),
-                    style = MaterialTheme.typography.bodySmall
-                )
+        if (subscriptions.isNotEmpty()) {
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "ПОДПИСКИ",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = NoraAmber,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedIconButton(onClick = onPingAllServers, enabled = !pingInProgress) {
+                        Icon(Icons.Default.Speed, contentDescription = "Измерить пинг серверов", tint = NoraAmber)
+                    }
+                    Spacer(Modifier.size(8.dp))
+                    OutlinedIconButton(onClick = onRefreshAllSubscriptions) {
+                        Icon(Icons.Default.Refresh, contentDescription = "Обновить все подписки", tint = NoraAmber)
+                    }
+                }
             }
-        }
-
-        item {
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(AppSpacing.xs)
-            ) {
-                Button(
-                    onClick = { showImportPanel = !showImportPanel },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(text = stringResource(R.string.profiles_import))
-                }
-                Button(
-                    onClick = { showSubscriptionPanel = !showSubscriptionPanel },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(text = stringResource(R.string.profiles_add_subscription))
-                }
-                Button(
-                    onClick = onRefreshAllSubscriptions,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(text = stringResource(R.string.profiles_subscription_refresh_all))
-                }
+            items(subscriptions, key = { it.id }) { source ->
+                SubscriptionCard(
+                    source = source,
+                    profiles = childrenBySubscription[source.id].orEmpty(),
+                    activeProfileId = activeProfileId,
+                    refreshing = refreshingSubscriptionIds.contains(source.id),
+                    onToggleCollapse = { onToggleSubscriptionCollapse(source.id) },
+                    onRefresh = { onRefreshSubscription(source.id) },
+                    onShowInfo = { subscriptionDetails = source },
+                    onRename = { renameSubscription = source },
+                    onDelete = { deleteSubscription = source },
+                    onToggleEnabled = { onSetSubscriptionEnabled(source.id, it) },
+                    onToggleAutoUpdate = { onSetSubscriptionAutoUpdate(source.id, it) },
+                    onEditInterval = { editIntervalSubscription = source },
+                    onSelectProfile = onSetActiveProfile,
+                    onTransientMessage = onTransientMessage
+                )
             }
         }
 
@@ -250,11 +300,20 @@ fun ProfilesScreen(
         }
 
         item {
-            Text(
-                text = stringResource(R.string.profiles_regular_profiles_header),
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold
-            )
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "ПРЯМЫЕ ПРОФИЛИ",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = NoraAmber,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    text = "${regularProfiles.size} ${if (regularProfiles.size == 1) "профиль" else "профиля"}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = NoraMuted
+                )
+            }
         }
 
         if (regularProfiles.isEmpty()) {
@@ -269,6 +328,7 @@ fun ProfilesScreen(
                 ProfileCard(
                     profile = profile,
                     isActive = profile.id == activeProfileId,
+                    pingText = serverPingResults[profile.id],
                     onSetActiveProfile = { onSetActiveProfile(profile.id) },
                     onDeleteProfile = { onDeleteProfile(profile.id) },
                     onOpenDetails = { detailsProfile = profile },
@@ -278,42 +338,6 @@ fun ProfilesScreen(
             }
         }
 
-        item {
-            Spacer(modifier = Modifier.padding(top = AppSpacing.xs))
-            Text(
-                text = stringResource(R.string.profiles_subscriptions_header),
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold
-            )
-        }
-
-        if (subscriptions.isEmpty()) {
-            item {
-                Text(
-                    text = stringResource(R.string.profiles_subscriptions_empty),
-                    style = MaterialTheme.typography.bodyMedium
-                )
-            }
-        } else {
-            items(subscriptions, key = { it.id }) { source ->
-                SubscriptionCard(
-                    source = source,
-                    profiles = childrenBySubscription[source.id].orEmpty(),
-                    activeProfileId = activeProfileId,
-                    refreshing = refreshingSubscriptionIds.contains(source.id),
-                    onToggleCollapse = { onToggleSubscriptionCollapse(source.id) },
-                    onRefresh = { onRefreshSubscription(source.id) },
-                    onShowInfo = { subscriptionDetails = source },
-                    onRename = { renameSubscription = source },
-                    onDelete = { deleteSubscription = source },
-                    onToggleEnabled = { onSetSubscriptionEnabled(source.id, it) },
-                    onToggleAutoUpdate = { onSetSubscriptionAutoUpdate(source.id, it) },
-                    onEditInterval = { editIntervalSubscription = source },
-                    onSelectProfile = onSetActiveProfile,
-                    onTransientMessage = onTransientMessage
-                )
-            }
-        }
     }
 
     detailsProfile?.let { profile ->
@@ -483,14 +507,8 @@ private fun SubscriptionCard(
     var menuExpanded by remember { mutableStateOf(false) }
     val metadata = remember(source.metadata) { SubscriptionMetadataCodec.decode(source.metadata) }
     val title = metadata.displayTitle ?: source.displayName
-    val providerLabel = metadata.providerName
-        ?: metadata.resolvedProviderDomain
-        ?: metadata.resolvedProviderSiteUrl?.let { runCatching { URL(it).host.removePrefix("www.") }.getOrNull() }
     val providerLink = metadata.preferredExternalUrl()
-    val trafficSummary = remember(metadata) { formatSubscriptionTrafficLine(metadata) }
     val expirySummary = remember(metadata) { formatSubscriptionExpiryLine(metadata) }
-    val providerDomainLine = providerLabel
-        ?: providerLink?.let { runCatching { URL(it).host.removePrefix("www.") }.getOrNull() }
     val serversLine = stringResource(
         R.string.profiles_subscription_servers_count,
         metadata.serverCount ?: profiles.size
@@ -500,15 +518,8 @@ private fun SubscriptionCard(
     }
     val resolvedUserId = metadata.userId ?: legendTokens.userId
     val resolvedPlanId = metadata.planId ?: legendTokens.planId
-    val providerMetaLine = remember(metadata, providerLink, resolvedUserId, resolvedPlanId) {
+    val providerMetaLine = remember(metadata, resolvedUserId, resolvedPlanId) {
         buildList {
-            metadata.resolvedProviderSiteUrl
-                ?.trim()
-                ?.takeIf { it.isNotBlank() }
-                ?.let { site ->
-                    val shortened = site.removePrefix("https://").removePrefix("http://")
-                    add("Наш сайт: $shortened")
-                }
             resolvedUserId?.trim()?.takeIf { it.isNotBlank() }?.let { add("ID: $it") }
             resolvedPlanId?.trim()?.takeIf { it.isNotBlank() }?.let { add("#$it") }
             metadata.note
@@ -534,12 +545,15 @@ private fun SubscriptionCard(
 
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.medium,
-        color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.65f))
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
+        color = NoraInkElevated,
+        border = BorderStroke(
+            1.dp,
+            if (source.enabled) NoraLine else NoraLine.copy(alpha = 0.48f)
+        )
     ) {
         Column(
-            modifier = Modifier.padding(AppSpacing.sm),
+            modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(AppSpacing.xs)
         ) {
             Row(
@@ -547,41 +561,57 @@ private fun SubscriptionCard(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm)
             ) {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.weight(1f)
-                )
-                if (!source.isCollapsed) {
-                    SubscriptionStatusChip(status = source.syncStatus, refreshing = refreshing)
+                Surface(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .softClickable(
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                            onClick = onToggleCollapse
+                        ),
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                    color = NoraAmber.copy(alpha = 0.14f),
+                    border = BorderStroke(1.dp, NoraAmber.copy(alpha = 0.38f))
+                ) {
+                    Icon(
+                        imageVector = if (source.isCollapsed) {
+                            Icons.Default.KeyboardArrowDown
+                        } else {
+                            Icons.Default.KeyboardArrowUp
+                        },
+                        contentDescription = if (source.isCollapsed) {
+                            "Раскрыть подписку"
+                        } else {
+                            "Свернуть подписку"
+                        },
+                        tint = NoraAmber,
+                        modifier = Modifier.padding(8.dp)
+                    )
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = NoraText,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "$serversLine · обновление ${source.updateIntervalMinutes / 60} ч",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = NoraMuted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
             }
 
-            if (!source.isCollapsed) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(AppSpacing.xs)
-                ) {
-                    providerDomainLine?.takeIf { it.isNotBlank() }?.let {
-                        Text(
-                            text = it,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-                    Text(
-                        text = serversLine,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+            SubscriptionUsageMeter(metadata = metadata)
 
-                if (!trafficSummary.isNullOrBlank() || !expirySummary.isNullOrBlank()) {
+            if (!source.isCollapsed) {
+                expirySummary?.let { summary ->
                     Text(
-                        text = listOfNotNull(trafficSummary, expirySummary).joinToString(" • "),
+                        text = summary,
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -591,7 +621,8 @@ private fun SubscriptionCard(
                     Text(
                         text = it,
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = NoraMuted,
+                        maxLines = Int.MAX_VALUE
                     )
                 }
 
@@ -599,67 +630,61 @@ private fun SubscriptionCard(
                     Text(
                         text = it,
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = NoraMuted
                     )
                 }
             }
 
+            HorizontalDivider(color = NoraLine.copy(alpha = 0.82f))
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                if (!providerLink.isNullOrBlank()) {
-                    CompactSubscriptionActionIconButton(
-                        onClick = {
-                            val opened = openExternalLink(context = context, url = providerLink)
-                            if (!opened) {
-                                onTransientMessage("Не удалось открыть ссылку провайдера")
-                            }
-                        },
-                        contentDescription = stringResource(R.string.subscription_open_provider_link)
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.OpenInNew,
-                            contentDescription = null
-                        )
-                    }
-                }
-                CompactSubscriptionActionIconButton(
+                SubscriptionActionIcon(
+                    modifier = Modifier.weight(1f),
+                    icon = Icons.Default.Refresh,
+                    contentDescription = "Обновить подписку",
                     onClick = onRefresh,
-                    contentDescription = stringResource(R.string.profiles_subscription_refresh)
-                ) {
-                    Icon(imageVector = Icons.Default.Refresh, contentDescription = null)
-                }
-                CompactSubscriptionActionIconButton(
-                    onClick = { menuExpanded = true },
-                    contentDescription = stringResource(R.string.profiles_actions)
-                ) {
-                    Icon(imageVector = Icons.Default.MoreVert, contentDescription = null)
-                }
-                CompactSubscriptionActionIconButton(
-                    onClick = onToggleCollapse,
-                    contentDescription = if (source.isCollapsed) {
-                        stringResource(R.string.profiles_expand)
-                    } else {
-                        stringResource(R.string.profiles_collapse)
-                    }
-                ) {
-                    Icon(
-                        imageVector = if (source.isCollapsed) {
-                            Icons.Default.KeyboardArrowDown
-                        } else {
-                            Icons.Default.KeyboardArrowUp
-                        },
-                        contentDescription = null
-                    )
-                }
+                    enabled = !refreshing
+                )
+                SubscriptionActionIcon(
+                    modifier = Modifier.weight(1f),
+                    icon = if (source.isCollapsed) Icons.Default.KeyboardArrowDown else Icons.Default.KeyboardArrowUp,
+                    contentDescription = if (source.isCollapsed) "Открыть подписку" else "Скрыть подписку",
+                    onClick = onToggleCollapse
+                )
+                SubscriptionActionIcon(
+                    modifier = Modifier.weight(1f),
+                    icon = Icons.Default.MoreHoriz,
+                    contentDescription = "Дополнительные действия",
+                    onClick = { menuExpanded = true }
+                )
+                SubscriptionActionIcon(
+                    modifier = Modifier.weight(1f),
+                    icon = Icons.Default.Delete,
+                    contentDescription = "Удалить подписку",
+                    tone = ActionTone.Danger,
+                    onClick = onDelete
+                )
             }
 
             DropdownMenu(
                 expanded = menuExpanded,
                 onDismissRequest = { menuExpanded = false }
             ) {
+                providerLink?.let { link ->
+                    DropdownMenuItem(
+                        text = { Text("Открыть сайт") },
+                        onClick = {
+                            menuExpanded = false
+                            if (!openExternalLink(context, link)) {
+                                onTransientMessage("Не удалось открыть ссылку провайдера")
+                            }
+                        }
+                    )
+                }
                 DropdownMenuItem(
                     text = { Text(stringResource(R.string.profiles_subscription_action_info)) },
                     onClick = {
@@ -853,6 +878,7 @@ private fun ProfileImportPanel(
 private fun ProfileCard(
     profile: VpnProfile,
     isActive: Boolean,
+    pingText: String?,
     onSetActiveProfile: () -> Unit,
     onDeleteProfile: () -> Unit,
     onOpenDetails: () -> Unit,
@@ -860,93 +886,116 @@ private fun ProfileCard(
     onRenameProfile: () -> Unit
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
+    val countryFlag = remember(profile.displayName) { countryFlagForProfileName(profile.displayName) }
 
     Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.medium,
-        color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.65f)),
+        modifier = Modifier.fillMaxWidth().softClickable(onClick = onSetActiveProfile),
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(18.dp),
+        color = NoraInkElevated,
+        border = BorderStroke(1.dp, if (isActive) NoraAmber.copy(alpha = 0.78f) else NoraLine),
         shadowElevation = 0.dp
     ) {
         Column(
-            modifier = Modifier.padding(AppSpacing.sm),
+            modifier = Modifier.padding(15.dp),
             verticalArrangement = Arrangement.spacedBy(AppSpacing.xs)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                    RadioButton(selected = isActive, onClick = onSetActiveProfile)
-                    Text(text = profile.displayName, style = MaterialTheme.typography.titleMedium)
+                    Surface(
+                        modifier = Modifier.size(36.dp),
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(11.dp),
+                        color = if (isActive) NoraAmber.copy(alpha = 0.16f) else NoraLine.copy(alpha = 0.45f)
+                    ) {
+                        if (countryFlag != null) {
+                            Text(
+                                text = countryFlag,
+                                modifier = Modifier.padding(7.dp),
+                                style = MaterialTheme.typography.titleMedium
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.Storage,
+                                contentDescription = null,
+                                tint = if (isActive) NoraAmber else NoraMuted,
+                                modifier = Modifier.padding(8.dp)
+                            )
+                        }
+                    }
+                    Spacer(Modifier.size(10.dp))
+                    Column {
+                        Text(text = profile.displayName, style = MaterialTheme.typography.titleMedium, color = NoraText, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            text = profileTypeLabel(profile.type),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = NoraMuted
+                        )
+                    }
                 }
 
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onOpenDetails) {
-                        Icon(Icons.Default.Info, contentDescription = stringResource(R.string.profiles_details))
-                    }
-                    IconButton(onClick = { menuExpanded = true }) {
-                        Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.profiles_actions))
-                    }
-                    DropdownMenu(
-                        expanded = menuExpanded,
-                        onDismissRequest = { menuExpanded = false }
-                    ) {
-                        DropdownMenuItem(
-                            text = { Text(stringResource(R.string.profiles_action_rename)) },
-                            onClick = {
-                                menuExpanded = false
-                                onRenameProfile()
-                            }
-                        )
-                        DropdownMenuItem(
-                            text = { Text(stringResource(R.string.profiles_action_view_config)) },
-                            onClick = {
-                                menuExpanded = false
-                                onOpenConfig()
-                            }
-                        )
-                        DropdownMenuItem(
-                            text = { Text(stringResource(R.string.profiles_details)) },
-                            onClick = {
-                                menuExpanded = false
-                                onOpenDetails()
-                            }
-                        )
-                        DropdownMenuItem(
-                            text = { Text(stringResource(R.string.profiles_delete)) },
-                            onClick = {
-                                menuExpanded = false
-                                onDeleteProfile()
-                            }
-                        )
-                    }
-                }
             }
 
-            Text(
-                text = stringResource(R.string.profiles_type_label, profileTypeLabel(profile.type)),
-                style = MaterialTheme.typography.bodySmall
-            )
-
-            if (profile.isPartialImport) {
+            if (isActive) {
                 Text(
-                    text = stringResource(R.string.profiles_partial_import),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.tertiary
+                    text = "Активный сервер",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = NoraAmber,
+                    fontWeight = FontWeight.SemiBold
                 )
             }
 
-            Text(
-                text = if (profile.dnsFallbackApplied) {
-                    stringResource(R.string.profiles_dns_fallback)
-                } else {
-                    stringResource(R.string.profiles_dns_custom)
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.primary
-            )
+            pingText?.let { value ->
+                Text(
+                    text = value,
+                    color = NoraAmber,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.align(Alignment.End)
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                WideServerAction(
+                    modifier = Modifier.weight(1f),
+                    label = if (isActive) "Выбран" else "Выбрать",
+                    icon = Icons.Default.Storage,
+                    onClick = onSetActiveProfile
+                )
+                WideServerAction(
+                    modifier = Modifier.weight(1f),
+                    label = "Подробнее",
+                    icon = Icons.Default.Info,
+                    onClick = onOpenDetails
+                )
+                WideServerAction(
+                    modifier = Modifier.weight(1f),
+                    label = "Ещё",
+                    icon = Icons.Default.MoreVert,
+                    onClick = { menuExpanded = true }
+                )
+            }
+
+            DropdownMenu(
+                expanded = menuExpanded,
+                onDismissRequest = { menuExpanded = false }
+            ) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.profiles_action_rename)) },
+                    onClick = { menuExpanded = false; onRenameProfile() }
+                )
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.profiles_action_view_config)) },
+                    onClick = { menuExpanded = false; onOpenConfig() }
+                )
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.profiles_delete)) },
+                    onClick = { menuExpanded = false; onDeleteProfile() }
+                )
+            }
         }
     }
 }
@@ -1456,10 +1505,209 @@ private fun CompactSubscriptionActionIconButton(
 ) {
     IconButton(
         onClick = onClick,
-        modifier = Modifier.size(34.dp)
+        modifier = Modifier
+            .size(36.dp)
+            .background(NoraAmber.copy(alpha = 0.09f), androidx.compose.foundation.shape.RoundedCornerShape(11.dp))
     ) {
-        content()
+        androidx.compose.runtime.CompositionLocalProvider(
+            androidx.compose.material3.LocalContentColor provides NoraAmber
+        ) { content() }
     }
+}
+
+private enum class ActionTone { Accent, Danger }
+
+@Composable
+private fun WideServerAction(
+    label: String,
+    icon: ImageVector,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    tone: ActionTone = ActionTone.Accent
+) {
+    val accent = if (tone == ActionTone.Danger) NoraDanger else NoraAmber
+    Surface(
+        modifier = modifier
+            .height(48.dp)
+            .softClickable(
+                enabled = enabled,
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                onClick = onClick
+            ),
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+        color = accent.copy(alpha = if (enabled) 0.10f else 0.04f),
+        border = BorderStroke(1.dp, accent.copy(alpha = if (enabled) 0.32f else 0.13f))
+    ) {
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Icon(icon, contentDescription = null, tint = accent, modifier = Modifier.size(16.dp))
+            Text(
+                text = label,
+                color = accent,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+private fun SubscriptionActionIcon(
+    icon: ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    tone: ActionTone = ActionTone.Accent
+) {
+    val accent = if (tone == ActionTone.Danger) NoraDanger else NoraAmber
+    Surface(
+        modifier = modifier
+            .height(40.dp)
+            .softClickable(
+                enabled = enabled,
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                onClick = onClick
+            ),
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+        color = accent.copy(alpha = if (enabled) 0.10f else 0.04f),
+        border = BorderStroke(1.dp, accent.copy(alpha = if (enabled) 0.32f else 0.13f))
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(
+                imageVector = icon,
+                contentDescription = contentDescription,
+                tint = accent,
+                modifier = Modifier.size(20.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun SubscriptionUsageMeter(
+    metadata: com.privatevpn.app.profiles.model.SubscriptionMetadataPayload
+) {
+    val totalBytes = metadata.trafficTotalBytes?.takeIf { it > 0L }
+    val usedBytes = metadata.usedTrafficBytes?.coerceAtLeast(0L) ?: 0L
+    val unlimited = totalBytes == null
+    val targetRatio = if (unlimited) 1f else {
+        (usedBytes.toDouble() / totalBytes!!.toDouble()).coerceIn(0.0, 1.0).toFloat()
+    }
+    val animatedRatio by animateFloatAsState(
+        targetValue = targetRatio,
+        animationSpec = tween(durationMillis = 620, easing = FastOutSlowInEasing),
+        label = "subscription_usage_fill"
+    )
+    val fillBrush = Brush.horizontalGradient(
+        colors = when {
+            unlimited -> listOf(Color(0xFF4FAE80), Color(0xFF88CFA5))
+            targetRatio >= 0.85f -> listOf(NoraDanger, Color(0xFFFFAA73))
+            else -> listOf(NoraAmber, Color(0xFFFFC15C))
+        }
+    )
+    val usageLabel = if (unlimited) {
+        "∞  Безлимитный трафик"
+    } else {
+        "${formatBytesForUi(usedBytes)} / ${formatBytesForUi(totalBytes)}"
+    }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Surface(
+            modifier = Modifier
+                .weight(1f)
+                .height(6.dp),
+            shape = androidx.compose.foundation.shape.RoundedCornerShape(99.dp),
+            color = NoraLine.copy(alpha = 0.84f)
+        ) {
+            Box {
+                Box(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .fillMaxWidth(animatedRatio)
+                        .background(fillBrush, androidx.compose.foundation.shape.RoundedCornerShape(99.dp))
+                )
+            }
+        }
+        Text(
+            text = usageLabel,
+            style = MaterialTheme.typography.labelSmall,
+            color = NoraMuted,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+private data class CountryFlagDefinition(
+    val flag: String,
+    val aliases: Set<String>,
+    val phrases: Set<String> = emptySet()
+)
+
+private val countryFlagDefinitions = listOf(
+    CountryFlagDefinition("🇳🇱", setOf("nl", "нл", "netherlands", "nederland", "нидерланды", "голландия", "amsterdam", "амстердам", "rotterdam", "роттердам")),
+    CountryFlagDefinition("🇩🇪", setOf("de", "deu", "ger", "germany", "deutschland", "германия", "berlin", "берлин", "frankfurt", "франкфурт", "munich", "мюнхен", "dusseldorf", "дюссельдорф")),
+    CountryFlagDefinition("🇷🇺", setOf("ru", "rus", "russia", "россия", "рф", "moscow", "москва", "spb", "питер", "петербург", "санкт")),
+    CountryFlagDefinition("🇫🇷", setOf("fr", "fra", "france", "франция", "paris", "париж")),
+    CountryFlagDefinition("🇫🇮", setOf("fi", "fin", "finland", "финляндия", "helsinki", "хельсинки")),
+    CountryFlagDefinition("🇬🇧", setOf("uk", "gb", "gbr", "england", "britain", "великобритания", "англия", "london", "лондон"), setOf("united kingdom")),
+    CountryFlagDefinition("🇺🇸", setOf("us", "usa", "america", "америка", "сша", "newyork", "losangeles", "ny"), setOf("united states", "new york", "лос анджелес")),
+    CountryFlagDefinition("🇮🇪", setOf("ie", "irl", "ireland", "ирландия", "dublin", "дублин")),
+    CountryFlagDefinition("🇮🇹", setOf("it", "ita", "italy", "италия", "rome", "рим", "milan", "милан")),
+    CountryFlagDefinition("🇪🇸", setOf("es", "esp", "spain", "испания", "madrid", "мадрид", "barcelona", "барселона")),
+    CountryFlagDefinition("🇪🇪", setOf("ee", "est", "estonia", "эстония", "tallinn", "таллин")),
+    CountryFlagDefinition("🇱🇹", setOf("lt", "ltu", "lithuania", "литва", "vilnius", "вильнюс")),
+    CountryFlagDefinition("🇱🇻", setOf("lv", "lva", "latvia", "латвия", "riga", "рига")),
+    CountryFlagDefinition("🇵🇱", setOf("pl", "pol", "poland", "польша", "warsaw", "варшава")),
+    CountryFlagDefinition("🇸🇪", setOf("se", "swe", "sweden", "швеция", "stockholm", "стокгольм")),
+    CountryFlagDefinition("🇳🇴", setOf("no", "nor", "norway", "норвегия", "oslo", "осло")),
+    CountryFlagDefinition("🇨🇭", setOf("ch", "che", "switzerland", "швейцария", "zurich", "цюрих")),
+    CountryFlagDefinition("🇦🇹", setOf("at", "aut", "austria", "австрия", "vienna", "вена")),
+    CountryFlagDefinition("🇹🇷", setOf("tr", "tur", "turkey", "турция", "istanbul", "стамбул")),
+    CountryFlagDefinition("🇸🇬", setOf("sg", "sgp", "singapore", "сингапур")),
+    CountryFlagDefinition("🇯🇵", setOf("jp", "jpn", "japan", "япония", "tokyo", "токио")),
+    CountryFlagDefinition("🇨🇦", setOf("ca", "can", "canada", "канада", "toronto", "торонто")),
+    CountryFlagDefinition("🇨🇿", setOf("cz", "cze", "czech", "чехия", "prague", "прага")),
+    CountryFlagDefinition("🇺🇦", setOf("ua", "ukr", "ukraine", "украина", "kyiv", "kiev", "киев")),
+    CountryFlagDefinition("🇧🇾", setOf("by", "blr", "belarus", "беларусь", "минск", "minsk")),
+    CountryFlagDefinition("🇰🇿", setOf("kz", "kaz", "kazakhstan", "казахстан", "almaty", "алматы")),
+    CountryFlagDefinition("🇦🇪", setOf("ae", "uae", "dubai", "дубай", "emirates", "эмираты")),
+    CountryFlagDefinition("🇮🇱", setOf("il", "isr", "israel", "израиль", "telaviv", "тельавив")),
+    CountryFlagDefinition("🇵🇹", setOf("pt", "prt", "portugal", "португалия", "lisbon", "лиссабон")),
+    CountryFlagDefinition("🇩🇰", setOf("dk", "dnk", "denmark", "дания", "copenhagen", "копенгаген")),
+    CountryFlagDefinition("🇧🇪", setOf("be", "bel", "belgium", "бельгия", "brussels", "брюссель")),
+    CountryFlagDefinition("🇷🇴", setOf("ro", "rou", "romania", "румыния", "bucharest", "бухарест")),
+    CountryFlagDefinition("🇧🇬", setOf("bg", "bgr", "bulgaria", "болгария", "sofia", "софия")),
+    CountryFlagDefinition("🇷🇸", setOf("rs", "srb", "serbia", "сербия", "belgrade", "белград")),
+    CountryFlagDefinition("🇬🇷", setOf("gr", "grc", "greece", "греция", "athens", "афины")),
+    CountryFlagDefinition("🇭🇺", setOf("hu", "hun", "hungary", "венгрия", "budapest", "будапешт"))
+)
+
+private fun countryFlagForProfileName(profileName: String): String? {
+    val normalizedName = profileName.lowercase(Locale.ROOT)
+    val tokens = Regex("[\\p{L}\\p{N}]+")
+        .findAll(normalizedName)
+        .map { it.value }
+        .toSet()
+    if (tokens.isEmpty()) return null
+    return countryFlagDefinitions
+        .filter { definition ->
+            definition.aliases.any(tokens::contains) ||
+                definition.phrases.any { phrase -> normalizedName.contains(phrase) }
+        }
+        .map(CountryFlagDefinition::flag)
+        .singleOrNull()
 }
 
 private fun openExternalLink(context: android.content.Context, url: String): Boolean {

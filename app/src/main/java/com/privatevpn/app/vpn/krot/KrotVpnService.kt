@@ -23,6 +23,7 @@ import com.privatevpn.app.vpn.AppTrafficMode
 import com.privatevpn.app.vpn.VpnConnectionStatus
 import com.privatevpn.app.vpn.VpnQuickSettingsTileService
 import com.privatevpn.app.vpn.VpnRuntimeStateStore
+import com.privatevpn.app.vpn.VpnSessionHistoryStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -181,6 +182,7 @@ class KrotVpnService : VpnService() {
 
                 VpnRuntimeStateStore.setInternalDataPlanePort(null)
                 VpnRuntimeStateStore.setStatus(VpnConnectionStatus.CONNECTED)
+                VpnRuntimeStateStore.startTrafficSampling(applicationInfo.uid)
                 updateForegroundNotification()
             }.onFailure { error ->
                 failWithError(
@@ -293,9 +295,14 @@ class KrotVpnService : VpnService() {
         synchronized(connectLock) {
             connectInProgress = false
         }
+        val traffic = VpnRuntimeStateStore.traffic.value
+        if (traffic.connectedAtMs != null) {
+            VpnSessionHistoryStore.recordCompletedSession(this, traffic, currentProfileName)
+        }
         session?.stop()
         session = null
         VpnRuntimeStateStore.setInternalDataPlanePort(null)
+        VpnRuntimeStateStore.stopTrafficSampling()
         VpnRuntimeStateStore.setAppTrafficMode(AppTrafficMode.UNKNOWN)
     }
 

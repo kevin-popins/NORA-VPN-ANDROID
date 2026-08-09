@@ -3,7 +3,9 @@
     <string name="app_name">NoraVPN</string>
 
     <string name="nav_home">Главная</string>
-    <string name="nav_profiles">Профили</string>
+    <string name="nav_profiles">Серверы</string>
+    <string name="nav_add">Добавить</string>
+    <string name="nav_traffic">Трафик</string>
     <string name="nav_private_session">Раздельное туннелирование</string>
     <string name="nav_private_session_short">Трафик</string>
     <string name="nav_logs">Логи</string>
@@ -48,9 +50,9 @@
     <string name="button_open_logs">Открыть логи</string>
     <string name="button_open_dns">Открыть DNS</string>
 
-    <string name="profiles_title">Профили подключения</string>
-    <string name="profiles_summary_title">Состояние профилей</string>
-    <string name="profiles_summary_active">Текущий профиль: %1$s</string>
+    <string name="profiles_title">Servers</string>
+    <string name="profiles_summary_title">ACTIVE SERVER</string>
+    <string name="profiles_summary_active">Выбранный узел: %1$s</string>
     <string name="profiles_socks_status">SOCKS: %1$s</string>
     <string name="profiles_empty">Пока нет импортированных профилей</string>
     <string name="profiles_import">Импортировать профиль</string>

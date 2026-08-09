@@ -74,6 +74,10 @@ class KrotTunnelSession(
         if (resumeTicket != null) {
             log("KRot session_resume_v1 ticket received")
         }
+        log(
+            "KRot secure features: key_update_v1=${openedTransport.secureOptions.keyUpdateEnabled} " +
+                "shape_padding_v1=${openedTransport.secureOptions.paddingEnabled}"
+        )
 
         val tun = establishTunInterface()
         tunInterface = tun
@@ -200,7 +204,10 @@ class KrotTunnelSession(
                             break
                         }
 
-                        KrotFrameType.Resume -> Unit
+                        KrotFrameType.Resume,
+                        // KrotSecureStream consumes negotiated KEY_UPDATE records before
+                        // returning application frames. Keep this branch defensive.
+                        KrotFrameType.KeyUpdate -> Unit
                     }
                 }
             } catch (error: Throwable) {

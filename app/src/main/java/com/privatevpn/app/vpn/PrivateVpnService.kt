@@ -231,6 +231,7 @@ class PrivateVpnService : VpnService() {
                 ).getOrThrow()
 
                 VpnRuntimeStateStore.setStatus(VpnConnectionStatus.CONNECTED)
+                VpnRuntimeStateStore.startTrafficSampling(applicationInfo.uid)
                 updateForegroundNotification()
             }.onFailure { error ->
                 failWithError(
@@ -381,6 +382,10 @@ class PrivateVpnService : VpnService() {
         synchronized(connectLock) {
             connectInProgress = false
         }
+        val traffic = VpnRuntimeStateStore.traffic.value
+        if (traffic.connectedAtMs != null) {
+            VpnSessionHistoryStore.recordCompletedSession(this, traffic, currentProfileName)
+        }
         dataPlaneManager.stop()
         stopBackendProcess()
         runCatching {
@@ -388,6 +393,7 @@ class PrivateVpnService : VpnService() {
         }
         tunInterface = null
         VpnRuntimeStateStore.setInternalDataPlanePort(null)
+        VpnRuntimeStateStore.stopTrafficSampling()
         VpnRuntimeStateStore.setAppTrafficMode(AppTrafficMode.UNKNOWN)
     }
 

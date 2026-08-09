@@ -3,6 +3,8 @@ package com.privatevpn.app.navigation
 import androidx.annotation.StringRes
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ShowChart
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.Storage
@@ -18,11 +20,19 @@ sealed class AppDestination(
 ) {
     data object Home : AppDestination("home", R.string.nav_home, R.string.nav_home, true, Icons.Filled.Home)
     data object Profiles : AppDestination("profiles", R.string.nav_profiles, R.string.nav_profiles, true, Icons.Filled.Storage)
+    data object Add : AppDestination("add", R.string.nav_add, R.string.nav_add, true, Icons.Filled.Add)
+    data object Traffic : AppDestination(
+        "traffic",
+        R.string.nav_traffic,
+        R.string.nav_traffic,
+        true,
+        Icons.Filled.ShowChart
+    )
     data object PrivateSession : AppDestination(
         "private_session",
         R.string.nav_private_session,
-        R.string.nav_private_session_short,
-        true,
+        R.string.nav_private_session,
+        false,
         Icons.Filled.Shuffle
     )
     data object Logs : AppDestination("logs", R.string.nav_logs, R.string.nav_logs, false)
@@ -30,7 +40,7 @@ sealed class AppDestination(
     data object Settings : AppDestination("settings", R.string.nav_settings, R.string.nav_settings, true, Icons.Filled.Settings)
 
     companion object {
-        val all = listOf(Home, Profiles, PrivateSession, Logs, Dns, Settings)
+        val all = listOf(Home, Profiles, Add, Traffic, PrivateSession, Logs, Dns, Settings)
         val bottomBarItems = all.filter { it.showInBottomBar }
         val topLevelItems = bottomBarItems
 
@@ -44,8 +54,9 @@ sealed class AppDestination(
             return when (fromRouteOrNull(route)) {
                 Home -> Home
                 Profiles -> Profiles
-                PrivateSession -> PrivateSession
-                Settings, Logs, Dns -> Settings
+                Add -> Add
+                Traffic -> Traffic
+                PrivateSession, Settings, Logs, Dns -> Settings
                 null -> Home
             }
         }

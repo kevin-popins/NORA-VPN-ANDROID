@@ -31,7 +31,8 @@ class KrotTransportSession(
     private val tlsSocket: SSLSocket,
     val secureStream: KrotSecureStream,
     val resumeTicket: String,
-    val resumeAccepted: Boolean
+    val resumeAccepted: Boolean,
+    val secureOptions: KrotSecureOptions
 ) : Closeable {
     override fun close() {
         runCatching { secureStream.close() }
@@ -42,6 +43,18 @@ class KrotTransportSession(
 
 object KrotProtocol {
     private val secureRandom = SecureRandom()
+    private val coverTemplates = listOf(
+        CoverTemplate("/assets/", ".bin", "application/octet-stream", "*/*", "no-cache"),
+        CoverTemplate("/api/v1/collect/", "", "application/octet-stream", "application/octet-stream,*/*;q=0.8", "no-store"),
+        CoverTemplate("/edge/beacon/", "", "application/x-protobuf", "*/*", "no-store"),
+        CoverTemplate("/sync/", "/events", "application/octet-stream", "*/*", "max-age=0"),
+        CoverTemplate("/cdn/assets/", "/payload", "application/octet-stream", "*/*", "no-cache")
+    )
+    private val coverUserAgents = listOf(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/125.0 Safari/537.36"
+    )
 
     fun open(
         rawSocket: Socket,
@@ -65,21 +78,29 @@ object KrotProtocol {
         val clientNonce = randomBytes(16)
         val hello = buildClientHello(spec, clientNonce, clientPublic, resumeTicket)
 
-        val coverPath = "/assets/${randomBytes(8).toHexLower()}.bin"
+        val template = coverTemplates[secureRandom.nextInt(coverTemplates.size)]
+        val coverPath = template.prefix + randomBytes(8).toHexLower() + template.suffix
         val header = buildString {
             append("POST ").append(coverPath).append(" HTTP/1.1\r\n")
             append("Host: ").append(spec.server.coverHost.ifBlank { tlsName }).append("\r\n")
-            append("User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) ")
-            append("AppleWebKit/537.36 Chrome/125.0 Safari/537.36\r\n")
-            append("Accept: */*\r\n")
-            append("Content-Type: application/octet-stream\r\n")
+            append("Connection: keep-alive\r\n")
+            append("Cache-Control: ").append(template.cacheControl).append("\r\n")
+            append("User-Agent: ").append(coverUserAgents[secureRandom.nextInt(coverUserAgents.size)]).append("\r\n")
+            append("Accept: ").append(template.accept).append("\r\n")
+            append("Accept-Language: en-US,en;q=0.9\r\n")
+            append("Content-Type: ").append(template.contentType).append("\r\n")
+            append("X-Request-ID: ").append(randomBytes(8).toHexLower()).append("\r\n")
             append("Content-Length: ").append(hello.size).append("\r\n")
-            append("Connection: keep-alive\r\n\r\n")
+            append("\r\n")
         }
 
         val output = tlsSocket.outputStream
-        output.write(header.toByteArray(StandardCharsets.US_ASCII))
-        output.write(hello)
+        if (secureRandom.nextBoolean()) {
+            output.write(header.toByteArray(StandardCharsets.US_ASCII))
+            output.write(hello)
+        } else {
+            output.write(header.toByteArray(StandardCharsets.US_ASCII) + hello)
+        }
         output.flush()
         log("KRot hidden bootstrap sent through HTTP cover")
 
@@ -88,7 +109,7 @@ object KrotProtocol {
             "KRot cover response was not HTTP 200"
         }
         val parsed = parseServerHello(response.body, spec, clientNonce)
-        val resumeCapabilities = parseResumeCapabilities(parsed.capabilities)
+        val serverCapabilities = parseServerCapabilities(parsed.capabilities)
 
         val serverPublic = KeyFactory.getInstance("EC")
             .generatePublic(X509EncodedKeySpec(parsed.publicKey))
@@ -105,15 +126,17 @@ object KrotProtocol {
             shared = dotNetShared,
             credentialKey = spec.credentials.credentialKey,
             clientNonce = clientNonce,
-            serverNonce = parsed.nonce
+            serverNonce = parsed.nonce,
+            options = serverCapabilities.secureOptions
         )
         log("KRot hidden auth accepted; encrypted record layer ready")
         return KrotTransportSession(
             rawSocket = rawSocket,
             tlsSocket = tlsSocket,
             secureStream = secure,
-            resumeTicket = resumeCapabilities.ticket,
-            resumeAccepted = resumeCapabilities.accepted
+            resumeTicket = serverCapabilities.ticket,
+            resumeAccepted = serverCapabilities.accepted,
+            secureOptions = serverCapabilities.secureOptions
         )
     }
 
@@ -189,19 +212,43 @@ object KrotProtocol {
         JSONObject()
             .put("transport_profile", spec.transportProfile)
             .put("relay", JSONArray().put("packet_v1"))
-            .put("commands", JSONArray().put("packet").put("ping").put("pong").put("close").put("resume"))
+            .put(
+                "commands",
+                JSONArray()
+                    .put("packet")
+                    .put("ping")
+                    .put("pong")
+                    .put("close")
+                    .put("resume")
+                    .put("key_update")
+            )
             .put("compliance", "NVP-1D")
             .put("session_resume_v1", true)
             .put("resume_ticket", resumeTicket.orEmpty())
+            .put("bootstrap_ts_unix", System.currentTimeMillis() / 1_000L)
+            .put("key_update_v1", true)
+            .put("shape_padding_v1", true)
             .toString()
 
-    private fun parseResumeCapabilities(capabilities: ByteArray): KrotResumeCapabilities = runCatching {
+    private fun parseServerCapabilities(capabilities: ByteArray): KrotServerCapabilities = runCatching {
         val root = JSONObject(String(capabilities, StandardCharsets.UTF_8))
-        KrotResumeCapabilities(
+        KrotServerCapabilities(
             ticket = root.optString("resume_ticket").trim(),
-            accepted = root.optBoolean("resume_accepted", false)
+            accepted = root.optBoolean("resume_accepted", false),
+            secureOptions = KrotSecureOptions(
+                keyUpdateEnabled = root.optBoolean("key_update_v1", false),
+                paddingEnabled = root.optBoolean("shape_padding_v1", false),
+                paddingMinBytes = root.optInt("frame_padding_min_bytes", 0),
+                paddingMaxBytes = root.optInt("frame_padding_max_bytes", 0),
+                keyUpdateMinPackets = root.optInt("key_update_min_packets", 128),
+                keyUpdateMaxPackets = root.optInt("key_update_max_packets", 384),
+                keyUpdateMinBytes = root.optLong("key_update_min_bytes", 256 * 1024L),
+                keyUpdateMaxBytes = root.optLong("key_update_max_bytes", 2 * 1024 * 1024L),
+                keyUpdateMinSeconds = root.optInt("key_update_min_seconds", 180),
+                keyUpdateMaxSeconds = root.optInt("key_update_max_seconds", 600)
+            ).normalize()
         )
-    }.getOrDefault(KrotResumeCapabilities())
+    }.getOrDefault(KrotServerCapabilities())
 
     private fun readHttpResponse(input: InputStream): HttpResponse {
         val headerBytes = ArrayList<Byte>(512)
@@ -236,15 +283,23 @@ object KrotProtocol {
     private fun randomBytes(len: Int): ByteArray = ByteArray(len).also(secureRandom::nextBytes)
 
     private data class HttpResponse(val header: String, val body: ByteArray)
+    private data class CoverTemplate(
+        val prefix: String,
+        val suffix: String,
+        val contentType: String,
+        val accept: String,
+        val cacheControl: String
+    )
     private data class ParsedServerHello(
         val nonce: ByteArray,
         val publicKey: ByteArray,
         val capabilities: ByteArray
     )
 
-    private data class KrotResumeCapabilities(
+    private data class KrotServerCapabilities(
         val ticket: String = "",
-        val accepted: Boolean = false
+        val accepted: Boolean = false,
+        val secureOptions: KrotSecureOptions = KrotSecureOptions.Disabled
     )
 
     private const val HANDSHAKE_TIMEOUT_MS = 15_000
@@ -255,7 +310,8 @@ enum class KrotFrameType(val code: Int) {
     Ping(2),
     Pong(3),
     Close(4),
-    Resume(5);
+    Resume(5),
+    KeyUpdate(6);
 
     companion object {
         fun fromCode(code: Int): KrotFrameType? = entries.firstOrNull { it.code == code }
@@ -267,49 +323,210 @@ data class KrotFrame(
     val payload: ByteArray
 )
 
+data class KrotSecureOptions(
+    val keyUpdateEnabled: Boolean,
+    val paddingEnabled: Boolean,
+    val paddingMinBytes: Int,
+    val paddingMaxBytes: Int,
+    val keyUpdateMinPackets: Int,
+    val keyUpdateMaxPackets: Int,
+    val keyUpdateMinBytes: Long,
+    val keyUpdateMaxBytes: Long,
+    val keyUpdateMinSeconds: Int,
+    val keyUpdateMaxSeconds: Int
+) {
+    fun normalize(): KrotSecureOptions {
+        val paddingMin = paddingMinBytes.coerceIn(0, 512)
+        val paddingMax = paddingMaxBytes.coerceAtLeast(paddingMin).coerceAtMost(512)
+        val packetMin = keyUpdateMinPackets.coerceIn(8, 1_000_000)
+        val packetMax = keyUpdateMaxPackets.coerceAtLeast(packetMin).coerceAtMost(1_000_000)
+        val byteMin = keyUpdateMinBytes.coerceIn(4_096L, 1L shl 34)
+        val byteMax = keyUpdateMaxBytes.coerceAtLeast(byteMin).coerceAtMost(1L shl 34)
+        val secondsMin = keyUpdateMinSeconds.coerceIn(30, 86_400)
+        val secondsMax = keyUpdateMaxSeconds.coerceAtLeast(secondsMin).coerceAtMost(86_400)
+        return copy(
+            paddingMinBytes = paddingMin,
+            paddingMaxBytes = paddingMax,
+            keyUpdateMinPackets = packetMin,
+            keyUpdateMaxPackets = packetMax,
+            keyUpdateMinBytes = byteMin,
+            keyUpdateMaxBytes = byteMax,
+            keyUpdateMinSeconds = secondsMin,
+            keyUpdateMaxSeconds = secondsMax
+        )
+    }
+
+    companion object {
+        val Disabled = KrotSecureOptions(
+            keyUpdateEnabled = false,
+            paddingEnabled = false,
+            paddingMinBytes = 0,
+            paddingMaxBytes = 0,
+            keyUpdateMinPackets = 128,
+            keyUpdateMaxPackets = 384,
+            keyUpdateMinBytes = 256 * 1024L,
+            keyUpdateMaxBytes = 2 * 1024 * 1024L,
+            keyUpdateMinSeconds = 180,
+            keyUpdateMaxSeconds = 600
+        )
+    }
+}
+
 class KrotSecureStream(
     private val input: InputStream,
     private val output: OutputStream,
-    private val sendKey: ByteArray,
-    private val recvKey: ByteArray
+    private val seed: ByteArray,
+    private val sendInfo: String,
+    private val recvInfo: String,
+    options: KrotSecureOptions
 ) : Closeable {
+    private val options = options.normalize()
+    private var sendKey = deriveTrafficKey(sendInfo, 0)
+    private var recvKey = deriveTrafficKey(recvInfo, 0)
     private var sendSeq: Long = 0L
     private var recvSeq: Long = 0L
+    private var sendEpoch: Int = 0
+    private var recvEpoch: Int = 0
+    private var sentFramesSinceKeyUpdate = 0
+    private var sentBytesSinceKeyUpdate = 0L
+    private var nextKeyUpdateFrames = Int.MAX_VALUE
+    private var nextKeyUpdateBytes = Long.MAX_VALUE
+    private var nextKeyUpdateAtMs = Long.MAX_VALUE
     private val writeLock = Any()
+
+    init {
+        scheduleNextKeyUpdate()
+    }
 
     fun writeFrame(type: KrotFrameType, payload: ByteArray) {
         require(payload.size <= 65535) { "KRot frame is too large" }
-
-        val plain = ByteArray(1 + 4 + payload.size)
-        plain[0] = type.code.toByte()
-        writeU32(plain, 1, payload.size.toLong())
-        payload.copyInto(plain, destinationOffset = 5)
-
         synchronized(writeLock) {
-            val seq = sendSeq++
-            val encrypted = encrypt(sendKey, seq, plain)
-            val len = ByteArray(4)
-            writeU32(len, 0, encrypted.size.toLong())
-            output.write(len)
-            output.write(encrypted)
-            output.flush()
+            if (type != KrotFrameType.KeyUpdate && shouldSendKeyUpdate()) {
+                writeKeyUpdateLocked()
+            }
+            writeFrameLocked(type, payload, allowPadding = type != KrotFrameType.KeyUpdate)
+            if (type != KrotFrameType.KeyUpdate) {
+                sentFramesSinceKeyUpdate += 1
+                sentBytesSinceKeyUpdate += payload.size.toLong()
+            }
         }
     }
 
     fun readFrame(): KrotFrame {
+        while (true) {
+            val frame = readOneFrame()
+            if (frame.type != KrotFrameType.KeyUpdate) return frame
+            require(options.keyUpdateEnabled) { "Unexpected KRot key update frame" }
+            require(frame.payload.size == 4) { "Bad KRot key update frame" }
+            val nextEpoch = readU32(frame.payload, 0)
+            require(nextEpoch == recvEpoch + 1) { "Unexpected KRot key update epoch" }
+            advanceRecvEpoch(nextEpoch)
+        }
+    }
+
+    private fun readOneFrame(): KrotFrame {
         val lenBuf = readExact(input, 4)
         val len = readU32(lenBuf, 0)
-        require(len in 21..65556) { "Bad KRot encrypted record length" }
+        val maxLength = 5 + 65535 + (if (options.paddingEnabled) options.paddingMaxBytes else 0) + 16
+        require(len in 21..maxLength) { "Bad KRot encrypted record length" }
         val encrypted = readExact(input, len)
         val seq = recvSeq++
-        val plain = decrypt(recvKey, seq, encrypted)
+        val plain = decrypt(recvKey, recvEpoch, seq, encrypted)
         require(plain.size >= 5) { "Bad KRot frame length" }
         val type = KrotFrameType.fromCode(plain[0].toInt() and 0xff)
             ?: throw IllegalStateException("Unknown KRot frame type ${plain[0].toInt() and 0xff}")
         val payloadLen = readU32(plain, 1)
-        require(payloadLen == plain.size - 5) { "Bad KRot payload length" }
-        return KrotFrame(type = type, payload = plain.copyOfRange(5, plain.size))
+        require(payloadLen <= plain.size - 5) { "Bad KRot payload length" }
+        val paddingLen = plain.size - 5 - payloadLen
+        require(paddingLen == 0 || (options.paddingEnabled && paddingLen <= options.paddingMaxBytes)) {
+            "Unexpected KRot frame padding"
+        }
+        return KrotFrame(type = type, payload = plain.copyOfRange(5, 5 + payloadLen))
     }
+
+    private fun writeFrameLocked(type: KrotFrameType, payload: ByteArray, allowPadding: Boolean) {
+        val paddingLength = if (allowPadding) choosePaddingLength(type, payload.size) else 0
+        val plain = ByteArray(1 + 4 + payload.size + paddingLength)
+        plain[0] = type.code.toByte()
+        writeU32(plain, 1, payload.size.toLong())
+        payload.copyInto(plain, destinationOffset = 5)
+        if (paddingLength > 0) {
+            val padding = ByteArray(paddingLength).also { SecureRandom().nextBytes(it) }
+            padding.copyInto(plain, destinationOffset = 5 + payload.size)
+        }
+        val seq = sendSeq++
+        val encrypted = encrypt(sendKey, sendEpoch, seq, plain)
+        val len = ByteArray(4)
+        writeU32(len, 0, encrypted.size.toLong())
+        output.write(len)
+        output.write(encrypted)
+        output.flush()
+    }
+
+    private fun writeKeyUpdateLocked() {
+        val nextEpoch = sendEpoch + 1
+        val payload = ByteArray(4)
+        writeU32(payload, 0, nextEpoch.toLong())
+        writeFrameLocked(KrotFrameType.KeyUpdate, payload, allowPadding = false)
+        advanceSendEpoch(nextEpoch)
+    }
+
+    private fun shouldSendKeyUpdate(): Boolean = options.keyUpdateEnabled && (
+        sentFramesSinceKeyUpdate >= nextKeyUpdateFrames ||
+            sentBytesSinceKeyUpdate >= nextKeyUpdateBytes ||
+            System.currentTimeMillis() >= nextKeyUpdateAtMs
+        )
+
+    private fun choosePaddingLength(type: KrotFrameType, payloadLength: Int): Int {
+        if (!options.paddingEnabled || options.paddingMaxBytes <= 0 || type == KrotFrameType.Close) return 0
+        val minimum = if (payloadLength <= 96) {
+            maxOf(options.paddingMinBytes, minOf(options.paddingMaxBytes, 16))
+        } else {
+            options.paddingMinBytes
+        }
+        return randomInt(minimum, options.paddingMaxBytes)
+    }
+
+    private fun advanceSendEpoch(nextEpoch: Int) {
+        sendKey = deriveTrafficKey(sendInfo, nextEpoch)
+        sendEpoch = nextEpoch
+        sendSeq = 0L
+        sentFramesSinceKeyUpdate = 0
+        sentBytesSinceKeyUpdate = 0L
+        scheduleNextKeyUpdate()
+    }
+
+    private fun advanceRecvEpoch(nextEpoch: Int) {
+        recvKey = deriveTrafficKey(recvInfo, nextEpoch)
+        recvEpoch = nextEpoch
+        recvSeq = 0L
+    }
+
+    private fun scheduleNextKeyUpdate() {
+        if (!options.keyUpdateEnabled) return
+        nextKeyUpdateFrames = randomInt(options.keyUpdateMinPackets, options.keyUpdateMaxPackets)
+        nextKeyUpdateBytes = randomLong(options.keyUpdateMinBytes, options.keyUpdateMaxBytes)
+        nextKeyUpdateAtMs = System.currentTimeMillis() + randomLong(
+            options.keyUpdateMinSeconds * 1_000L,
+            options.keyUpdateMaxSeconds * 1_000L
+        )
+    }
+
+    private fun randomInt(min: Int, max: Int): Int =
+        if (max <= min) min else SecureRandom().nextInt(max - min + 1) + min
+
+    private fun randomLong(min: Long, max: Long): Long {
+        if (max <= min) return min
+        val range = max - min + 1
+        var candidate: Long
+        do {
+            candidate = SecureRandom().nextLong().ushr(1)
+        } while (candidate >= Long.MAX_VALUE - (Long.MAX_VALUE % range))
+        return min + candidate % range
+    }
+
+    private fun deriveTrafficKey(info: String, epoch: Int): ByteArray =
+        hkdf(seed, "$info epoch $epoch", 32)
 
     override fun close() {
         runCatching { output.flush() }
@@ -322,16 +539,17 @@ class KrotSecureStream(
             shared: ByteArray,
             credentialKey: String,
             clientNonce: ByteArray,
-            serverNonce: ByteArray
+            serverNonce: ByteArray,
+            options: KrotSecureOptions
         ): KrotSecureStream {
             val seed = buildSeed(shared, credentialKey, clientNonce, serverNonce)
-            val clientToServer = hkdf(seed, "nvp1 c2s", 32)
-            val serverToClient = hkdf(seed, "nvp1 s2c", 32)
             return KrotSecureStream(
                 input = input,
                 output = output,
-                sendKey = clientToServer,
-                recvKey = serverToClient
+                seed = seed,
+                sendInfo = "nvp1 c2s",
+                recvInfo = "nvp1 s2c",
+                options = options
             )
         }
 
@@ -363,17 +581,17 @@ class KrotSecureStream(
     }
 }
 
-private fun encrypt(key: ByteArray, seq: Long, plain: ByteArray): ByteArray {
+private fun encrypt(key: ByteArray, epoch: Int, seq: Long, plain: ByteArray): ByteArray {
     val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-    cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, nonce(seq)))
-    cipher.updateAAD(associatedData(seq))
+    cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, nonce(epoch, seq)))
+    cipher.updateAAD(associatedData(epoch, seq))
     return cipher.doFinal(plain)
 }
 
-private fun decrypt(key: ByteArray, seq: Long, encrypted: ByteArray): ByteArray {
+private fun decrypt(key: ByteArray, epoch: Int, seq: Long, encrypted: ByteArray): ByteArray {
     val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-    cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, nonce(seq)))
-    cipher.updateAAD(associatedData(seq))
+    cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, nonce(epoch, seq)))
+    cipher.updateAAD(associatedData(epoch, seq))
     return cipher.doFinal(encrypted)
 }
 
@@ -393,9 +611,15 @@ private fun hmac(key: ByteArray, data: ByteArray): ByteArray {
 
 private fun sha256(value: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(value)
 
-private fun nonce(seq: Long): ByteArray = ByteArray(12).also { writeU64(it, 4, seq) }
+private fun nonce(epoch: Int, seq: Long): ByteArray = ByteArray(12).also {
+    writeU32(it, 0, epoch.toLong())
+    writeU64(it, 4, seq)
+}
 
-private fun associatedData(seq: Long): ByteArray = ByteArray(8).also { writeU64(it, 0, seq) }
+private fun associatedData(epoch: Int, seq: Long): ByteArray = ByteArray(12).also {
+    writeU32(it, 0, epoch.toLong())
+    writeU64(it, 4, seq)
+}
 
 private fun readExact(input: InputStream, len: Int): ByteArray {
     val buf = ByteArray(len)

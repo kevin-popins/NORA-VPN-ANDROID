@@ -69,7 +69,7 @@ class MainActivity : ComponentActivity() {
     private fun configureSystemBars() {
         window.statusBarColor = Color.TRANSPARENT
         val controller = WindowInsetsControllerCompat(window, window.decorView)
-        controller.isAppearanceLightStatusBars = true
-        controller.isAppearanceLightNavigationBars = true
+        controller.isAppearanceLightStatusBars = false
+        controller.isAppearanceLightNavigationBars = false
     }
 }

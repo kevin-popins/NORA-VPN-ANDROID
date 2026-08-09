@@ -22,6 +22,7 @@ import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -36,9 +37,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -54,11 +57,17 @@ import com.privatevpn.app.navigation.AppDestination
 import com.privatevpn.app.profiles.model.ProfileType
 import com.privatevpn.app.settings.SettingsState
 import com.privatevpn.app.ui.screens.DnsScreen
+import com.privatevpn.app.ui.screens.AddScreen
 import com.privatevpn.app.ui.screens.HomeScreen
 import com.privatevpn.app.ui.screens.LogsScreen
 import com.privatevpn.app.ui.screens.PrivateSessionScreen
 import com.privatevpn.app.ui.screens.ProfilesScreen
 import com.privatevpn.app.ui.screens.SettingsScreen
+import com.privatevpn.app.ui.screens.NoraSettingsScreen
+import com.privatevpn.app.ui.screens.TrafficScreen
+import com.privatevpn.app.ui.theme.NoraInk
+import com.privatevpn.app.ui.theme.NoraInkElevated
+import com.privatevpn.app.ui.theme.NoraLine
 import com.privatevpn.app.vpn.VpnQuickSettingsTileService
 import kotlinx.coroutines.launch
 
@@ -81,15 +90,18 @@ fun PrivateVpnApp(
     val composeScope = rememberCoroutineScope()
     var homeReselectSignal by remember { mutableIntStateOf(0) }
     var profilesReselectSignal by remember { mutableIntStateOf(0) }
+    var profilesFocusActiveSignal by remember { mutableIntStateOf(0) }
     var privateSessionReselectSignal by remember { mutableIntStateOf(0) }
     var settingsReselectSignal by remember { mutableIntStateOf(0) }
     var settingsSocksFocusSignal by remember { mutableIntStateOf(0) }
     var showNotificationOnboarding by remember { mutableStateOf(false) }
-    var showLocalhostSocksOnboarding by remember { mutableStateOf(false) }
 
     val currentRoute = navBackStackEntry?.destination?.route
     val currentDestination = AppDestination.fromRouteOrNull(currentRoute) ?: AppDestination.Home
     val selectedBottomDestination = AppDestination.topLevelForRoute(currentRoute)
+    val welcomeHome = currentDestination == AppDestination.Home &&
+        uiState.profilesLoaded &&
+        uiState.profiles.isEmpty() && uiState.subscriptions.isEmpty()
 
     fun navigateToTopLevel(destination: AppDestination) {
         navController.navigate(destination.route) {
@@ -105,6 +117,12 @@ fun PrivateVpnApp(
         navController.navigate(destination.route) {
             launchSingleTop = true
         }
+    }
+
+    fun openActiveServerInProfiles() {
+        profilesFocusActiveSignal += 1
+        appViewModel.revealActiveProfileInServers()
+        navigateToTopLevel(AppDestination.Profiles)
     }
 
     val vpnPermissionLauncher = rememberLauncherForActivityResult(
@@ -154,20 +172,6 @@ fun PrivateVpnApp(
         }
     }
 
-    LaunchedEffect(uiState.settingsState) {
-        val readiness = evaluateLocalhostSocksReadiness(uiState.settingsState)
-        showLocalhostSocksOnboarding = readiness.shouldShowWarning
-        appViewModel.logLocalhostSocksOnboardingCheck(
-            onboardingShown = readiness.onboardingShown,
-            socksEnabled = readiness.socksEnabled,
-            loginSet = readiness.loginSet,
-            passwordSet = readiness.passwordSet,
-            portValid = readiness.portValid,
-            persistedConfigured = readiness.persistedConfigured,
-            shouldShowWarning = readiness.shouldShowWarning
-        )
-    }
-
     LaunchedEffect(requestVpnPermissionOnStart) {
         if (requestVpnPermissionOnStart) {
             val intent = appViewModel.requestVpnPermissionIntent()
@@ -191,31 +195,49 @@ fun PrivateVpnApp(
         containerColor = MaterialTheme.colorScheme.background,
         snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
         topBar = {
-            TopAppBar(
-                title = { Text(text = stringResource(currentDestination.titleRes)) },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background,
-                    scrolledContainerColor = MaterialTheme.colorScheme.background
+            if (!currentDestination.showInBottomBar) {
+                TopAppBar(
+                    title = { Text(text = stringResource(currentDestination.titleRes)) },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = NoraInk,
+                        scrolledContainerColor = NoraInk,
+                        titleContentColor = MaterialTheme.colorScheme.onBackground
+                    )
                 )
-            )
+            }
         },
         bottomBar = {
-            androidx.compose.foundation.layout.Column {
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            androidx.compose.foundation.layout.Column(Modifier.zIndex(10f)) {
+                HorizontalDivider(
+                    color = if (welcomeHome || currentDestination in setOf(
+                            AppDestination.Traffic,
+                            AppDestination.Settings,
+                            AppDestination.PrivateSession,
+                            AppDestination.Logs,
+                            AppDestination.Dns
+                        )
+                    ) {
+                        Color.Transparent
+                    } else {
+                        NoraLine
+                    }
+                )
                 NavigationBar(
-                    containerColor = MaterialTheme.colorScheme.surface,
+                    containerColor = if (welcomeHome) NoraInk else NoraInkElevated,
                     tonalElevation = 0.dp
                 ) {
                     AppDestination.topLevelItems.forEach { destination ->
                         val selected = selectedBottomDestination.route == destination.route
                         NavigationBarItem(
                             selected = selected,
+                            alwaysShowLabel = destination != AppDestination.Add,
                             onClick = {
                                 if (selected) {
                                     when (destination) {
                                         AppDestination.Home -> homeReselectSignal += 1
                                         AppDestination.Profiles -> profilesReselectSignal += 1
-                                        AppDestination.PrivateSession -> privateSessionReselectSignal += 1
+                                        AppDestination.Add -> Unit
+                                        AppDestination.Traffic -> Unit
                                         AppDestination.Settings -> settingsReselectSignal += 1
                                         else -> Unit
                                     }
@@ -225,15 +247,34 @@ fun PrivateVpnApp(
                             icon = {
                                 val icon = destination.icon
                                 if (icon != null) {
-                                    Icon(
-                                        imageVector = icon,
-                                        contentDescription = stringResource(destination.bottomTitleRes)
-                                    )
+                                    if (destination == AppDestination.Add) {
+                                        Surface(
+                                            modifier = Modifier.padding(top = 1.dp),
+                                            shape = androidx.compose.foundation.shape.CircleShape,
+                                            color = com.privatevpn.app.ui.theme.NoraAmber
+                                        ) {
+                                            Icon(
+                                                imageVector = icon,
+                                                contentDescription = stringResource(destination.bottomTitleRes),
+                                                tint = NoraInk,
+                                                modifier = Modifier.padding(13.dp)
+                                            )
+                                        }
+                                    } else {
+                                        Icon(
+                                            imageVector = icon,
+                                            contentDescription = stringResource(destination.bottomTitleRes)
+                                        )
+                                    }
                                 }
                             },
-                            label = { Text(text = stringResource(destination.bottomTitleRes)) },
+                            label = {
+                                if (destination != AppDestination.Add) {
+                                    Text(text = stringResource(destination.bottomTitleRes))
+                                }
+                            },
                             colors = NavigationBarItemDefaults.colors(
-                                indicatorColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                                indicatorColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
                                 selectedIconColor = MaterialTheme.colorScheme.primary,
                                 selectedTextColor = MaterialTheme.colorScheme.primary,
                                 unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -253,6 +294,8 @@ fun PrivateVpnApp(
             composable(AppDestination.Home.route) {
                 HomeScreen(
                     vpnStatus = uiState.vpnStatus,
+                    traffic = uiState.traffic,
+                    profilesLoaded = uiState.profilesLoaded,
                     connectionErrorMessage = uiState.connectionError,
                     activeProfileName = uiState.activeProfile?.displayName,
                     protocolLabel = profileTypeLabel(uiState.activeProfile?.type),
@@ -278,7 +321,8 @@ fun PrivateVpnApp(
                     onSetActiveProfile = appViewModel::setActiveProfile,
                     onToggleSubscriptionCollapse = appViewModel::toggleSubscriptionCollapse,
                     onRefreshSubscription = { appViewModel.refreshSubscription(it, showSuccessMessage = true) },
-                    onTransientMessage = appViewModel::emitTransientMessage
+                    onTransientMessage = appViewModel::emitTransientMessage,
+                    onOpenProfiles = ::openActiveServerInProfiles
                 )
             }
 
@@ -288,8 +332,11 @@ fun PrivateVpnApp(
                     subscriptions = uiState.subscriptions,
                     refreshingSubscriptionIds = uiState.refreshingSubscriptionIds,
                     activeProfileId = uiState.activeProfileId,
+                    serverPingResults = uiState.serverPingResults,
+                    pingInProgress = uiState.pingInProgress,
                     errorMessage = null,
                     scrollToTopSignal = profilesReselectSignal,
+                    focusActiveSignal = profilesFocusActiveSignal,
                     socksSettings = uiState.settingsState.socksSettings,
                     splitTunnelingEnabled = uiState.privateSessionUiState.enabled,
                     onImportProfile = appViewModel::importProfile,
@@ -299,6 +346,7 @@ fun PrivateVpnApp(
                     onAddSubscription = appViewModel::addSubscription,
                     onRefreshSubscription = { appViewModel.refreshSubscription(it, showSuccessMessage = true) },
                     onRefreshAllSubscriptions = appViewModel::refreshAllSubscriptions,
+                    onPingAllServers = appViewModel::pingAllServers,
                     onToggleSubscriptionCollapse = appViewModel::toggleSubscriptionCollapse,
                     onRenameSubscription = appViewModel::renameSubscription,
                     onDeleteSubscription = appViewModel::deleteSubscription,
@@ -313,6 +361,14 @@ fun PrivateVpnApp(
                 )
             }
 
+            composable(AppDestination.Add.route) {
+                AddScreen(
+                    onImportProfile = appViewModel::importProfile,
+                    onImportFile = { profileFileLauncher.launch(arrayOf("*/*")) },
+                    onAddSubscription = appViewModel::addSubscription
+                )
+            }
+
             composable(AppDestination.PrivateSession.route) {
                 PrivateSessionScreen(
                     state = uiState.privateSessionUiState,
@@ -320,6 +376,14 @@ fun PrivateVpnApp(
                     onRefreshApps = appViewModel::refreshPrivateSessionData,
                     onSessionEnabledChange = appViewModel::setPrivateSessionEnabled,
                     onToggleTrustedApp = appViewModel::toggleTrustedAppSelection
+                )
+            }
+
+            composable(AppDestination.Traffic.route) {
+                TrafficScreen(
+                    traffic = uiState.traffic,
+                    vpnStatus = uiState.vpnStatus,
+                    sessionHistory = uiState.sessionHistory
                 )
             }
 
@@ -344,17 +408,13 @@ fun PrivateVpnApp(
             }
 
             composable(AppDestination.Settings.route) {
-                SettingsScreen(
-                    settingsState = uiState.settingsState,
-                    splitTunnelingEnabled = uiState.privateSessionUiState.enabled,
-                    systemVpnIntegration = uiState.privateSessionUiState.systemIntegration,
-                    scrollToTopSignal = settingsReselectSignal,
-                    focusSocksSignal = settingsSocksFocusSignal,
-                    onAutoConnectChanged = appViewModel::setAutoConnect,
-                    onVerboseLogsChanged = appViewModel::setVerboseLogs,
-                    onSaveSocksSettings = appViewModel::saveSocksSettings,
+                NoraSettingsScreen(
+                    settings = uiState.settingsState,
                     notificationPermission = uiState.notificationPermission,
-                    onRequestNotificationsPermission = {
+                    onOpenPrivateSession = { navigateToSecondary(AppDestination.PrivateSession) },
+                    onOpenLogs = { navigateToSecondary(AppDestination.Logs) },
+                    onOpenDns = { navigateToSecondary(AppDestination.Dns) },
+                    onRequestNotifications = {
                         if (!uiState.notificationPermission.granted && uiState.notificationPermission.supported) {
                             appViewModel.markNotificationPermissionPromptShown()
                             if (uiState.notificationPermission.shouldOpenSystemSettings) {
@@ -365,76 +425,13 @@ fun PrivateVpnApp(
                             }
                         }
                     },
-                    onAddTileClick = {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && context is Activity) {
-                            val statusBarManager = context.getSystemService(StatusBarManager::class.java)
-                            statusBarManager?.requestAddTileService(
-                                ComponentName(context, VpnQuickSettingsTileService::class.java),
-                                context.getString(R.string.quick_tile_label),
-                                Icon.createWithResource(context, R.drawable.ic_qs_vpn_foreground),
-                                context.mainExecutor
-                            ) { resultCode ->
-                                if (resultCode == StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ADDED ||
-                                    resultCode == StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ALREADY_ADDED
-                                ) {
-                                    composeScope.launch {
-                                        snackbarHostState.showSnackbar(context.getString(R.string.settings_tile_added_hint))
-                                    }
-                                }
-                            }
-                        } else {
-                            runCatching {
-                                context.startActivity(Intent(Settings.ACTION_SETTINGS))
-                            }
-                            appViewModel.emitTransientMessage(context.getString(R.string.settings_tile_manual_hint))
-                        }
-                    },
-                    onOpenLogs = { navigateToSecondary(AppDestination.Logs) },
-                    onOpenDns = { navigateToSecondary(AppDestination.Dns) },
-                    onOpenSystemVpnSettings = {
-                        val intent = appViewModel.buildOpenSystemVpnSettingsIntent()
-                        runCatching { context.startActivity(intent) }
-                    },
-                    onTransientMessage = appViewModel::emitTransientMessage
+                    onSaveSocks = appViewModel::saveSocksSettings
                 )
             }
-        }
-    }
-
-    if (showLocalhostSocksOnboarding) {
-        AlertDialog(
-            onDismissRequest = {
-                appViewModel.markLocalhostSocksOnboardingShown()
-                showLocalhostSocksOnboarding = false
-            },
-            title = { Text(text = stringResource(R.string.localhost_onboarding_title)) },
-            text = { Text(text = stringResource(R.string.localhost_onboarding_text)) },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        appViewModel.markLocalhostSocksOnboardingShown()
-                        showLocalhostSocksOnboarding = false
-                        settingsSocksFocusSignal += 1
-                        navigateToTopLevel(AppDestination.Settings)
-                    }
-                ) {
-                    Text(text = stringResource(R.string.localhost_onboarding_open_settings))
-                }
-            },
-            dismissButton = {
-                TextButton(
-                    onClick = {
-                        appViewModel.markLocalhostSocksOnboardingShown()
-                        showLocalhostSocksOnboarding = false
-                    }
-                ) {
-                    Text(text = stringResource(R.string.localhost_onboarding_later))
-                }
             }
-        )
-    }
+        }
 
-    if (!showLocalhostSocksOnboarding && showNotificationOnboarding) {
+    if (showNotificationOnboarding) {
         AlertDialog(
             onDismissRequest = {
                 appViewModel.markNotificationPermissionPromptShown()

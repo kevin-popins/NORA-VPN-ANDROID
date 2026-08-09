@@ -57,6 +57,7 @@ import com.privatevpn.app.vpn.VpnConnectionStatus
 import com.privatevpn.app.vpn.VpnController
 import com.privatevpn.app.vpn.VpnManager
 import com.privatevpn.app.vpn.VpnRuntimeStateStore
+import com.privatevpn.app.vpn.VpnSessionHistoryStore
 import com.privatevpn.app.vpn.tunnel.AndroidVpnTunnelLifecycle
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
@@ -290,10 +291,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val uiState: StateFlow<AppUiState> = combine(
         coreUiState,
         privateSessionAuxState,
-        uiAuxState
+        uiAuxState,
+        vpnManager.traffic,
+        VpnSessionHistoryStore.records
     ) { coreState,
         privateSessionAux,
-        uiAux ->
+        uiAux,
+        traffic,
+        sessionHistory ->
         val activeProfile = coreState.profiles.firstOrNull { it.id == coreState.settings.activeProfileId }
         val dnsState = resolveDnsState(settings = coreState.settings, activeProfile = activeProfile)
         val draftTrustedPackages = if (privateSessionAux.draftDirty) {
@@ -303,6 +308,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         AppUiState(
+            // The initial StateFlow value is intentionally not treated as an empty database.
+            // Home uses this to avoid showing onboarding while Room is still reading profiles.
+            profilesLoaded = true,
             vpnStatus = coreState.status,
             profiles = coreState.profiles,
             subscriptions = coreState.subscriptions,
@@ -332,6 +340,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             settingsState = coreState.settings,
             dnsState = dnsState,
             appTrafficMode = coreState.appTrafficMode,
+            traffic = traffic,
+            sessionHistory = sessionHistory,
             notificationPermission = NotificationPermissionUiState(
                 supported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU,
                 granted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -350,6 +360,22 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     )
 
     init {
+        VpnSessionHistoryStore.initialize(application.applicationContext)
+        viewModelScope.launch {
+            val current = userSettingsRepository.settings.first()
+            if (current.socksSettings.login.isBlank() || current.socksSettings.password.isBlank()) {
+                userSettingsRepository.setSocksSettings(
+                    SocksSettings(
+                        enabled = true,
+                        port = 1080,
+                        login = "nora_" + UUID.randomUUID().toString().replace("-", "").take(10),
+                        password = UUID.randomUUID().toString().replace("-", "") + UUID.randomUUID().toString().replace("-", "").take(8)
+                    )
+                )
+                userSettingsRepository.setLocalhostSocksOnboardingShown(true)
+                addLog(LogLevel.INFO, "Для localhost SOCKS созданы локальные учётные данные")
+            }
+        }
         addLog(LogLevel.INFO, "Приложение запущено")
         SubscriptionUpdateWorker.schedule(application.applicationContext)
         refreshVpnPermissionState()
@@ -806,6 +832,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         technicalReason = error.message
                     )
                 )
+            }
+        }
+    }
+
+    fun revealActiveProfileInServers() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val activeProfile = uiState.value.activeProfile ?: return@launch
+            val subscriptionId = activeProfile.parentSubscriptionId ?: return@launch
+            val subscription = uiState.value.subscriptions.firstOrNull { it.id == subscriptionId } ?: return@launch
+            if (subscription.isCollapsed) {
+                runCatching { subscriptionRepository.toggleCollapse(subscriptionId) }
             }
         }
     }

@@ -50,6 +50,7 @@ fun SettingsScreen(
     onAddTileClick: () -> Unit,
     onOpenLogs: () -> Unit,
     onOpenDns: () -> Unit,
+    onOpenPrivateSession: () -> Unit,
     onOpenSystemVpnSettings: () -> Unit,
     onTransientMessage: (String) -> Unit
 ) {
@@ -271,6 +272,9 @@ fun SettingsScreen(
                 }
                 Button(onClick = onOpenDns, modifier = Modifier.fillMaxWidth()) {
                     Text(text = stringResource(R.string.settings_open_dns))
+                }
+                Button(onClick = onOpenPrivateSession, modifier = Modifier.fillMaxWidth()) {
+                    Text(text = stringResource(R.string.nav_private_session))
                 }
             }
         }
