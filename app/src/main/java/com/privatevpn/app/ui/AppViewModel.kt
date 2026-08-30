@@ -32,6 +32,8 @@ import com.privatevpn.app.private_session.PrivateSessionUiState
 import com.privatevpn.app.private_session.SystemVpnIntegrationState
 import com.privatevpn.app.private_session.VpnSystemSettingsRepository
 import com.privatevpn.app.profiles.db.PrivateVpnDatabase
+import com.privatevpn.app.profiles.deeplink.NoraDeepLinkImport
+import com.privatevpn.app.profiles.deeplink.NoraDeepLinkParser
 import com.privatevpn.app.profiles.importer.ProfileImportParser
 import com.privatevpn.app.profiles.model.ImportedProfileDraft
 import com.privatevpn.app.profiles.model.ProfileType
@@ -154,6 +156,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var lastRuntimeErrorLogged: String? = null
     private var lastSocksOnboardingLogSignature: String? = null
     private var trustedAppsPersistJob: Job? = null
+    private var profileSwitchJob: Job? = null
+    private val profileSwitchRequests = ProfileSwitchRequestQueue()
+    private var queuedDisconnectJob: Job? = null
+
+    @Volatile
+    private var disconnectQueued: Boolean = false
 
     private data class CoreUiState(
         val status: VpnConnectionStatus,
@@ -562,12 +570,26 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun disconnectVpn() {
         if (!backendOperationMutex.tryLock()) {
-            addLog(LogLevel.INFO, "BACKEND SWITCH: disconnect пропущен, операция backend уже выполняется")
+            disconnectQueued = true
+            profileSwitchRequests.clear()
+            addLog(LogLevel.INFO, "BACKEND SWITCH: disconnect поставлен в очередь до завершения текущей операции")
+            if (queuedDisconnectJob?.isActive != true) {
+                queuedDisconnectJob = viewModelScope.launch {
+                    backendOperationMutex.lock()
+                    try {
+                        disconnectQueued = false
+                        disconnectVpnInternal()
+                    } finally {
+                        backendOperationMutex.unlock()
+                    }
+                }
+            }
             return
         }
 
         viewModelScope.launch {
             try {
+                disconnectQueued = false
                 disconnectVpnInternal()
             } finally {
                 backendOperationMutex.unlock()
@@ -631,6 +653,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
+        startProfileBackend(
+            profile = profile,
+            snapshot = snapshot,
+            switchPerformed = switchRequired
+        )
+    }
+
+    private suspend fun startProfileBackend(
+        profile: VpnProfile,
+        snapshot: AppUiState,
+        switchPerformed: Boolean
+    ) {
+        val targetType = profile.type
         val backendAdapter = resolveBackendAdapter(targetType)
         val startResult = startBackendWithWarmupRetry(
             backendAdapter = backendAdapter,
@@ -640,7 +675,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             trustedPackages = snapshot.privateSessionUiState.trustedPackages,
             socksSettings = snapshot.settingsState.socksSettings,
             targetBackendType = targetType,
-            switchPerformed = switchRequired
+            switchPerformed = switchPerformed
         )
 
         startResult.onSuccess { result ->
@@ -766,6 +801,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun importExternalIntent(intent: Intent) {
         viewModelScope.launch {
+            val deepLink = intent.dataString?.takeIf(NoraDeepLinkParser::isNoraDeepLink)
+            if (deepLink != null) {
+                importNoraDeepLink(deepLink)
+                return@launch
+            }
             val payloads = withContext(Dispatchers.IO) {
                 extractExternalImportPayloads(intent)
             }
@@ -787,6 +827,33 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun addSubscription(sourceUrl: String, displayName: String?) {
         viewModelScope.launch(Dispatchers.IO) {
             addSubscriptionInternal(sourceUrl = sourceUrl, displayName = displayName)
+        }
+    }
+
+    private suspend fun importNoraDeepLink(rawUri: String) {
+        runCatching {
+            NoraDeepLinkParser.parse(rawUri)
+        }.onSuccess { request ->
+            when (request) {
+                is NoraDeepLinkImport.Subscription -> addSubscriptionInternal(
+                    sourceUrl = request.url,
+                    displayName = request.displayName,
+                    reportToAddScreen = true
+                )
+
+                is NoraDeepLinkImport.Profile -> importProfileInternal(
+                    rawInput = request.payload,
+                    sourceLabel = "deep link",
+                    reportToAddScreen = true
+                )
+            }
+        }.onFailure { error ->
+            applyUiError(
+                AppErrors.profileImportFailed(
+                    technicalReason = "invalid NORA deep link: ${error.message}"
+                )
+            )
+            emitTransientMessage("Не удалось открыть ссылку импорта NORA VPN.")
         }
     }
 
@@ -1066,33 +1133,158 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setActiveProfile(profileId: String) {
-        if (blockProfileSelectionWhileConnected(profileId)) return
+        val snapshot = uiState.value
+        val profile = snapshot.profiles.firstOrNull { it.id == profileId }
+        if (profile == null) {
+            applyUiError(
+                AppErrors.genericUiStateError(
+                    userMessage = "Выбранный сервер больше недоступен.",
+                    technicalReason = "setActiveProfile profile not found: $profileId"
+                )
+            )
+            return
+        }
 
-        viewModelScope.launch {
-            runCatching {
-                userSettingsRepository.setActiveProfile(profileId)
-            }.onSuccess {
-                val profile = uiState.value.profiles.firstOrNull { it.id == profileId }
-                val name = profile?.displayName ?: profileId
-                vpnManager.updateActiveProfileName(name)
-                VpnRuntimeStateStore.setLastSelectedProfileName(name)
-                profile?.parentSubscriptionId?.let { parentId ->
-                    runCatching {
-                        subscriptionRepository.setLastSelectedProfile(
-                            subscriptionId = parentId,
-                            profileId = profile.id
-                        )
-                    }
+        if (!isVpnConnectedOrConnecting(snapshot.vpnStatus)) {
+            viewModelScope.launch {
+                persistActiveProfileSelection(profile)
+            }
+            return
+        }
+
+        if (profileId == snapshot.activeProfileId && profileSwitchJob?.isActive != true) {
+            return
+        }
+
+        profileSwitchRequests.offer(profileId)
+        if (profileSwitchJob?.isActive == true) {
+            addLog(LogLevel.INFO, "PROFILE SWITCH: в очередь поставлен последний выбор '${profile.displayName}'")
+            return
+        }
+
+        profileSwitchJob = viewModelScope.launch {
+            while (true) {
+                val requestedProfileId = profileSwitchRequests.takeLatest() ?: break
+                backendOperationMutex.lock()
+                try {
+                    switchActiveProfileInternal(requestedProfileId)
+                } finally {
+                    backendOperationMutex.unlock()
                 }
-                addLog(LogLevel.INFO, "Активный профиль: $name")
-            }.onFailure { error ->
-                handleError(
-                    userMessage = "Не удалось выбрать активный профиль",
-                    error = error,
-                    fallbackCode = AppErrorCode.UI_002
+            }
+        }
+    }
+
+    private suspend fun switchActiveProfileInternal(requestedProfileId: String) {
+        var profile = uiState.value.profiles.firstOrNull { it.id == requestedProfileId } ?: run {
+            applyUiError(
+                AppErrors.genericUiStateError(
+                    userMessage = "Выбранный сервер больше недоступен.",
+                    technicalReason = "hot switch profile not found: $requestedProfileId"
+                )
+            )
+            return
+        }
+
+        val beforeStop = uiState.value
+        val currentStatus = vpnManager.status.value
+        if (!isVpnConnectedOrConnecting(currentStatus)) {
+            persistActiveProfileSelection(profile)
+            return
+        }
+
+        if (beforeStop.privateSessionUiState.enabled && beforeStop.privateSessionUiState.trustedPackages.isEmpty()) {
+            applyUiError(
+                AppErrors.splitTunnelingNoTrustedApps(
+                    technicalReason = "profile hot switch blocked: privateSession enabled, trustedPackages empty"
+                )
+            )
+            return
+        }
+
+        addLog(
+            LogLevel.INFO,
+            "PROFILE SWITCH: '${beforeStop.activeProfile?.displayName ?: "<unknown>"}' -> '${profile.displayName}'"
+        )
+        val stopped = performBackendSwitch(
+            currentBackendType = resolveCurrentBackendType(),
+            targetBackendType = profile.type,
+            currentStatus = currentStatus
+        )
+        if (!stopped) return
+
+        profileSwitchRequests.takeLatest()?.let { latestId ->
+            uiState.value.profiles.firstOrNull { it.id == latestId }?.let { latestProfile ->
+                profile = latestProfile
+                addLog(LogLevel.INFO, "PROFILE SWITCH: применён последний выбор '${latestProfile.displayName}'")
+            }
+        }
+
+        profile = recoverProfileWithMissingShortId(profile)
+        if (!persistActiveProfileSelection(profile)) return
+
+        if (disconnectQueued) {
+            addLog(LogLevel.INFO, "PROFILE SWITCH: запуск нового сервера отменён ожидающей командой отключения")
+            return
+        }
+
+        when (val readyStatus = vpnManager.status.value) {
+            VpnConnectionStatus.READY -> {
+                startProfileBackend(
+                    profile = profile,
+                    snapshot = uiState.value,
+                    switchPerformed = true
+                )
+            }
+
+            VpnConnectionStatus.NO_PERMISSION -> {
+                emitTransientMessage("Сервер выбран. Для подключения снова разрешите NORA VPN создать VPN-соединение.")
+                addLog(LogLevel.INFO, "PROFILE SWITCH: запуск отменён, VPN-разрешение передано другому приложению")
+            }
+
+            VpnConnectionStatus.ERROR -> {
+                addLog(LogLevel.ERROR, "PROFILE SWITCH: backend остановлен с ошибкой, новый сервер не запущен")
+            }
+
+            else -> {
+                applyUiError(
+                    AppErrors.backendSwitchTimeout(
+                        fromBackend = backendTypeLabel(resolveCurrentBackendType()),
+                        toBackend = backendTypeLabel(profile.type),
+                        technicalReason = "unexpected post-stop status=${readyStatus.name}"
+                    )
                 )
             }
         }
+    }
+
+    private suspend fun persistActiveProfileSelection(profile: VpnProfile): Boolean {
+        return runCatching {
+            userSettingsRepository.setActiveProfile(profile.id)
+            profile.parentSubscriptionId?.let { parentId ->
+                runCatching {
+                    subscriptionRepository.setLastSelectedProfile(
+                        subscriptionId = parentId,
+                        profileId = profile.id
+                    )
+                }.onFailure { error ->
+                    addLog(
+                        LogLevel.INFO,
+                        "Не удалось обновить последний сервер подписки '${profile.displayName}': ${error.message}"
+                    )
+                }
+            }
+        }.onSuccess {
+            vpnManager.updateActiveProfileName(profile.displayName)
+            VpnRuntimeStateStore.setLastSelectedProfileName(profile.displayName)
+            addLog(LogLevel.INFO, "Активный профиль: ${profile.displayName}")
+        }.onFailure { error ->
+            handleError(
+                userMessage = "Не удалось выбрать активный профиль",
+                error = error,
+                fallbackCode = AppErrorCode.UI_002
+            )
+        }.isSuccess
     }
 
     fun refreshPrivateSessionData() {
@@ -1471,27 +1663,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun isVpnConnectedOrConnecting(status: VpnConnectionStatus = uiState.value.vpnStatus): Boolean {
         return status == VpnConnectionStatus.CONNECTED || status == VpnConnectionStatus.CONNECTING
-    }
-
-    private fun blockProfileSelectionWhileConnected(requestedProfileId: String): Boolean {
-        val snapshot = uiState.value
-        val status = snapshot.vpnStatus
-        val currentProfileId = snapshot.activeProfileId
-
-        if (!isVpnConnectedOrConnecting(status)) return false
-        if (requestedProfileId == currentProfileId) return false
-
-        applyUiError(
-            AppErrors.genericUiStateError(
-                userMessage = "Нельзя менять активный профиль при активном VPN. Сначала отключите VPN.",
-                technicalReason = "blocked setActiveProfile while status=${status.name}, from=$currentProfileId, to=$requestedProfileId"
-            )
-        )
-        addLog(
-            LogLevel.INFO,
-            "PROFILE LOCK: попытка сменить активный профиль при status=${status.name} отклонена"
-        )
-        return true
     }
 
     private fun blockSplitTunnelingMutationWhileConnected(action: String): Boolean {

@@ -12,6 +12,9 @@
     <string name="nav_dns">DNS</string>
     <string name="nav_settings">Настройки</string>
 
+    <string name="nora_bot_add_cta">Нет подписки? Купить NORA VPN в Telegram </string>
+    <string name="nora_bot_welcome_cta">Нет подписки? Купить в Telegram</string>
+
     <string name="home_vpn_status_label">Статус VPN</string>
     <string name="home_status_no_permission">Нет разрешения VPN</string>
     <string name="home_status_ready">Готово к подключению</string>

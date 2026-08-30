@@ -16,6 +16,7 @@ import org.amnezia.awg.backend.GoBackend
 import org.amnezia.awg.backend.NoopTunnelActionHandler
 import org.amnezia.awg.backend.Tunnel
 import org.amnezia.awg.config.Config
+import java.util.UUID
 
 class AmneziaWgBackendAdapter(
     appContext: Context,
@@ -28,22 +29,9 @@ class AmneziaWgBackendAdapter(
     }
     private val stateLock = Any()
     private var currentConfig: Config? = null
+    private var currentTunnel: Tunnel? = null
+    private var currentRuntimeToken: String? = null
     private var startInProgress = false
-
-    private val tunnel = object : Tunnel {
-        override fun getName(): String = "privatevpn-awg"
-
-        override fun onStateChange(state: Tunnel.State) {
-            when (state) {
-                Tunnel.State.UP -> VpnRuntimeStateStore.setStatus(VpnConnectionStatus.CONNECTED)
-                Tunnel.State.DOWN -> updateReadyOrNoPermission()
-            }
-        }
-
-        override fun isIpv4ResolutionPreferred(): Boolean = true
-
-        override fun isMetered(): Boolean = false
-    }
 
     override fun start(
         profile: VpnProfile,
@@ -61,7 +49,14 @@ class AmneziaWgBackendAdapter(
             }
 
             try {
-                VpnRuntimeStateStore.setStatus(VpnConnectionStatus.CONNECTING)
+                val runtimeToken = UUID.randomUUID().toString()
+                val tunnel = createTunnel(runtimeToken)
+                synchronized(stateLock) {
+                    currentTunnel = tunnel
+                    currentRuntimeToken = runtimeToken
+                }
+                VpnRuntimeStateStore.claimRuntimeOwner(runtimeToken)
+                VpnRuntimeStateStore.setStatusForOwner(runtimeToken, VpnConnectionStatus.CONNECTING)
                 val runtime = runtimeConfigBuilder.build(
                     AmneziaWgRuntimeBuildInput(
                         sourceConfig = profile.sourceRaw,
@@ -88,7 +83,7 @@ class AmneziaWgBackendAdapter(
                         AppTrafficMode.UNKNOWN
                     }
                 )
-                VpnRuntimeStateStore.setStatus(VpnConnectionStatus.CONNECTED)
+                markConnected(runtimeToken)
                 VpnQuickSettingsTileService.requestTileStateRefresh(context)
 
                 val runtimeVersion = runCatching { backend.version }.getOrNull()
@@ -114,17 +109,30 @@ class AmneziaWgBackendAdapter(
             val appError = AppErrors.awgRuntimeStartFailed(
                 technicalReason = error.message ?: "Не удалось запустить AmneziaWG backend"
             )
-            VpnRuntimeStateStore.setError(appError.toUiMessage())
+            val runtimeToken = synchronized(stateLock) { currentRuntimeToken }
+            val applied = runtimeToken?.let {
+                VpnRuntimeStateStore.finishRuntimeErrorForOwner(it, appError.toUiMessage())
+            } ?: false
+            if (!applied && runtimeToken == null) {
+                VpnRuntimeStateStore.setError(appError.toUiMessage())
+            }
+            synchronized(stateLock) {
+                currentConfig = null
+                currentTunnel = null
+                currentRuntimeToken = null
+            }
             Log.w(TAG, appError.toLogMessage(), error)
         }
     }
 
     override fun stop(): Result<Unit> {
         return runCatching {
-            val config = synchronized(stateLock) { currentConfig }
-            if (config != null) {
+            val (tunnel, config, runtimeToken) = synchronized(stateLock) {
+                Triple(currentTunnel, currentConfig, currentRuntimeToken)
+            }
+            if (tunnel != null && config != null) {
                 backend.setState(tunnel, Tunnel.State.DOWN, config)
-            } else {
+            } else if (tunnel != null) {
                 runCatching {
                     backend.setState(tunnel, Tunnel.State.DOWN, null)
                 }
@@ -132,11 +140,15 @@ class AmneziaWgBackendAdapter(
 
             synchronized(stateLock) {
                 currentConfig = null
+                currentTunnel = null
+                currentRuntimeToken = null
                 startInProgress = false
             }
             VpnRuntimeStateStore.setInternalDataPlanePort(null)
             VpnRuntimeStateStore.setAppTrafficMode(AppTrafficMode.UNKNOWN)
-            updateReadyOrNoPermission()
+            if (runtimeToken != null) {
+                markDisconnected(runtimeToken)
+            }
             VpnQuickSettingsTileService.requestTileStateRefresh(context)
         }.onFailure { error ->
             val appError = AppErrors.awgRuntimeStopFailed(
@@ -148,12 +160,35 @@ class AmneziaWgBackendAdapter(
         }
     }
 
-    private fun updateReadyOrNoPermission() {
-        if (VpnService.prepare(context) == null) {
-            VpnRuntimeStateStore.setStatus(VpnConnectionStatus.READY)
-        } else {
-            VpnRuntimeStateStore.setStatus(VpnConnectionStatus.NO_PERMISSION)
+    private fun createTunnel(runtimeToken: String): Tunnel = object : Tunnel {
+        override fun getName(): String = "privatevpn-awg"
+
+        override fun onStateChange(state: Tunnel.State) {
+            when (state) {
+                Tunnel.State.UP -> markConnected(runtimeToken)
+                Tunnel.State.DOWN -> markDisconnected(runtimeToken)
+            }
         }
+
+        override fun isIpv4ResolutionPreferred(): Boolean = true
+
+        override fun isMetered(): Boolean = false
+    }
+
+    private fun markConnected(runtimeToken: String) {
+        if (VpnRuntimeStateStore.traffic.value.connectedAtMs == null) {
+            VpnRuntimeStateStore.startTrafficSamplingForOwner(runtimeToken, context.applicationInfo.uid)
+        }
+        VpnRuntimeStateStore.setStatusForOwner(runtimeToken, VpnConnectionStatus.CONNECTED)
+    }
+
+    private fun markDisconnected(runtimeToken: String) {
+        val status = if (VpnService.prepare(context) == null) {
+            VpnConnectionStatus.READY
+        } else {
+            VpnConnectionStatus.NO_PERMISSION
+        }
+        VpnRuntimeStateStore.finishRuntimeForOwner(runtimeToken, status)
     }
 
     private companion object {

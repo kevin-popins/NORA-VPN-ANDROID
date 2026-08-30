@@ -10,18 +10,24 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.FileOpen
+import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.privatevpn.app.R
+import com.privatevpn.app.ui.openNoraTelegramBot
 import com.privatevpn.app.ui.theme.NoraAmber
 import com.privatevpn.app.ui.theme.NoraInk
 import com.privatevpn.app.ui.theme.NoraMuted
@@ -32,6 +38,7 @@ fun AddScreen(
     onImportFile: () -> Unit,
     onAddSubscription: (String, String?) -> Unit
 ) {
+    val context = LocalContext.current
     var value by rememberSaveable { mutableStateOf("") }
     val normalized = value.trim()
     Column(
@@ -66,6 +73,14 @@ fun AddScreen(
         Button(onClick = onImportFile, modifier = Modifier.fillMaxWidth().height(48.dp)) {
             androidx.compose.material3.Icon(Icons.Default.FileOpen, null)
             Text("  Импорт из файла")
+        }
+        TextButton(
+            onClick = { openNoraTelegramBot(context) },
+            modifier = Modifier.fillMaxWidth().height(44.dp),
+            colors = ButtonDefaults.textButtonColors(contentColor = NoraAmber)
+        ) {
+            Text(stringResource(R.string.nora_bot_add_cta), fontWeight = FontWeight.Medium)
+            androidx.compose.material3.Icon(Icons.Default.OpenInNew, contentDescription = null)
         }
     }
 }

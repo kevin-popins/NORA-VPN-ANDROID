@@ -28,6 +28,9 @@ data class VpnTrafficState(
 )
 
 object VpnRuntimeStateStore {
+    private val runtimeOwnerLock = Any()
+    private var runtimeOwnerToken: String? = null
+
     private val _status = MutableStateFlow(VpnConnectionStatus.NO_PERMISSION)
     val status: StateFlow<VpnConnectionStatus> = _status.asStateFlow()
 
@@ -52,6 +55,71 @@ object VpnRuntimeStateStore {
         _status.value = status
         if (status != VpnConnectionStatus.ERROR) {
             _lastError.value = null
+        }
+    }
+
+    fun claimRuntimeOwner(ownerToken: String) {
+        require(ownerToken.isNotBlank()) { "Runtime owner token must not be blank" }
+        synchronized(runtimeOwnerLock) {
+            if (runtimeOwnerToken != ownerToken) {
+                stopTrafficSampling()
+                setInternalDataPlanePort(null)
+                setAppTrafficMode(AppTrafficMode.UNKNOWN)
+            }
+            runtimeOwnerToken = ownerToken
+        }
+    }
+
+    fun isRuntimeOwner(ownerToken: String?): Boolean {
+        if (ownerToken.isNullOrBlank()) return false
+        return synchronized(runtimeOwnerLock) { runtimeOwnerToken == ownerToken }
+    }
+
+    fun setStatusForOwner(ownerToken: String, status: VpnConnectionStatus): Boolean {
+        return synchronized(runtimeOwnerLock) {
+            if (runtimeOwnerToken != ownerToken) return@synchronized false
+            setStatus(status)
+            true
+        }
+    }
+
+    fun startTrafficSamplingForOwner(ownerToken: String, uid: Int): Boolean {
+        return synchronized(runtimeOwnerLock) {
+            if (runtimeOwnerToken != ownerToken) return@synchronized false
+            startTrafficSampling(uid)
+            true
+        }
+    }
+
+    fun stopTrafficSamplingForOwner(ownerToken: String): Boolean {
+        return synchronized(runtimeOwnerLock) {
+            if (runtimeOwnerToken != ownerToken) return@synchronized false
+            stopTrafficSampling()
+            true
+        }
+    }
+
+    fun finishRuntimeForOwner(ownerToken: String, status: VpnConnectionStatus): Boolean {
+        return synchronized(runtimeOwnerLock) {
+            if (runtimeOwnerToken != ownerToken) return@synchronized false
+            runtimeOwnerToken = null
+            stopTrafficSampling()
+            setInternalDataPlanePort(null)
+            setAppTrafficMode(AppTrafficMode.UNKNOWN)
+            setStatus(status)
+            true
+        }
+    }
+
+    fun finishRuntimeErrorForOwner(ownerToken: String, message: String): Boolean {
+        return synchronized(runtimeOwnerLock) {
+            if (runtimeOwnerToken != ownerToken) return@synchronized false
+            runtimeOwnerToken = null
+            stopTrafficSampling()
+            setInternalDataPlanePort(null)
+            setAppTrafficMode(AppTrafficMode.UNKNOWN)
+            setError(message)
+            true
         }
     }
 

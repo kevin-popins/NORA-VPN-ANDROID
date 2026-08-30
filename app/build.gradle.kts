@@ -38,8 +38,8 @@ android {
         applicationId = "com.privatevpn.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 4
-        versionName = "1.2.0"
+        versionCode = 5
+        versionName = "1.3.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -91,6 +91,16 @@ android {
         }
         jniLibs {
             useLegacyPackaging = true
+        }
+    }
+}
+
+tasks.configureEach {
+    if (name == "packageRelease" || name == "assembleRelease" || name == "bundleRelease") {
+        doFirst {
+            check(noraSigningReady) {
+                "Release build requires the permanent NORA signing key configuration."
+            }
         }
     }
 }

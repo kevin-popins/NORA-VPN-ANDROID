@@ -24,7 +24,11 @@ class VpnController(private val appContext: Context) {
 
     fun refreshPermissionState() {
         if (getPrepareIntent() != null) {
+            VpnRuntimeStateStore.stopTrafficSampling()
+            VpnRuntimeStateStore.setInternalDataPlanePort(null)
+            VpnRuntimeStateStore.setAppTrafficMode(AppTrafficMode.UNKNOWN)
             VpnRuntimeStateStore.setStatus(VpnConnectionStatus.NO_PERMISSION)
+            VpnQuickSettingsTileService.requestTileStateRefresh(appContext)
             return
         }
 

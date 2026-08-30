@@ -38,6 +38,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -61,11 +62,14 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.privatevpn.app.R
+import com.privatevpn.app.ui.openNoraTelegramBot
+import com.privatevpn.app.ui.location.resolveNoraRegion
 import com.privatevpn.app.ui.theme.NoraAmber
 import com.privatevpn.app.ui.theme.NoraDanger
 import com.privatevpn.app.ui.theme.NoraGreen
@@ -563,6 +567,7 @@ fun NoraWelcomeScene(
     onAddProfile: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     val transition = rememberInfiniteTransition(label = "nora_welcome_ambient")
     val farShift by transition.animateFloat(
         initialValue = -0.012f,
@@ -625,44 +630,27 @@ fun NoraWelcomeScene(
                 Spacer(Modifier.width(8.dp))
                 Text("Добавить профиль", fontWeight = FontWeight.SemiBold)
             }
+            Spacer(Modifier.height(6.dp))
+            TextButton(
+                onClick = { openNoraTelegramBot(context) },
+                modifier = Modifier.fillMaxWidth().height(42.dp),
+                colors = ButtonDefaults.textButtonColors(contentColor = NoraAmber)
+            ) {
+                Text(
+                    text = stringResource(R.string.nora_bot_welcome_cta),
+                    fontWeight = FontWeight.Medium
+                )
+            }
         }
     }
 }
 
 private fun noraLocationPhotoIds(context: android.content.Context, profileName: String): List<Int> {
-    val normalized = profileName.lowercase()
-    val names = when {
-        normalized.contains("нидерланд") || normalized.contains("netherland") || normalized.contains("amsterdam") -> listOf("netherlands1", "netherlands2", "netherlands3")
-        normalized.contains("герман") || normalized.contains("germany") || normalized.contains("frankfurt") -> listOf("germany1", "germany2", "germany3")
-        normalized.contains("франц") || normalized.contains("france") -> listOf("france1", "france2", "france3")
-        normalized.contains("росси") || normalized.contains("москва") || normalized.contains("russia") -> listOf("russia1", "russia2", "russia3")
-        normalized.contains("финлянд") || normalized.contains("finland") -> listOf("finland1", "finland2", "finland3")
-        normalized.contains("сша") || normalized.contains("usa") || normalized.contains("united states") -> listOf("usa1", "usa2", "usa3")
-        normalized.contains("британ") || normalized.contains("england") || normalized.contains("uk") -> listOf("uk1", "uk2", "uk3")
-        normalized.contains("ирланд") || normalized.contains("ireland") -> listOf("ireland", "ireland1", "ireland3")
-        normalized.contains("итал") || normalized.contains("italy") -> listOf("italy")
-        normalized.contains("испан") || normalized.contains("spain") -> listOf("spain")
-        normalized.contains("эстон") || normalized.contains("estonia") -> listOf("estonia")
-        normalized.contains("литв") || normalized.contains("lithuania") -> listOf("lithuania1", "lithuania2", "lithuania3")
-        normalized.contains("польш") || normalized.contains("poland") || normalized.contains("polska") ||
-            normalized.contains("варшав") || normalized.contains("warsaw") ||
-            normalized.contains("краков") || normalized.contains("krakow") -> listOf("poland1", "poland2", "poland3")
-        else -> listOf("universal")
-    }
+    val names = resolveNoraRegion(profileName)?.backgroundNames.orEmpty().ifEmpty { listOf("universal") }
     return names.mapNotNull { name ->
         context.resources.getIdentifier("nora_location_$name", "drawable", context.packageName).takeIf { it != 0 }
     }.ifEmpty { listOf(R.drawable.nora_location_universal) }
 }
 
-private fun noraCountryLabel(profileName: String): String = when {
-    profileName.contains("нидерланд", true) || profileName.contains("netherland", true) || profileName.contains("amsterdam", true) -> "Нидерланды"
-    profileName.contains("герман", true) || profileName.contains("germany", true) || profileName.contains("frankfurt", true) -> "Германия"
-    profileName.contains("франц", true) || profileName.contains("france", true) -> "Франция"
-    profileName.contains("росси", true) || profileName.contains("москва", true) || profileName.contains("russia", true) -> "Россия"
-    profileName.contains("финлянд", true) || profileName.contains("finland", true) -> "Финляндия"
-    profileName.contains("сша", true) || profileName.contains("usa", true) -> "США"
-    profileName.contains("польш", true) || profileName.contains("poland", true) || profileName.contains("polska", true) ||
-        profileName.contains("варшав", true) || profileName.contains("warsaw", true) ||
-        profileName.contains("краков", true) || profileName.contains("krakow", true) -> "Польша"
-    else -> "Без региона"
-}
+private fun noraCountryLabel(profileName: String): String =
+    resolveNoraRegion(profileName)?.labelRu ?: "Без региона"

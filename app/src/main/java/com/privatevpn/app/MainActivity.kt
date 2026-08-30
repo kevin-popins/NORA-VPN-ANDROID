@@ -50,6 +50,11 @@ class MainActivity : ComponentActivity() {
         if (intent.isExternalImportIntent()) {
             externalImportIntent = Intent(intent)
             externalImportIntentVersion += 1
+            setIntent(
+                Intent(this, MainActivity::class.java).apply {
+                    action = Intent.ACTION_MAIN
+                }
+            )
         }
     }
 

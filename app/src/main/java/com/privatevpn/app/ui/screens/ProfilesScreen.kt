@@ -84,6 +84,7 @@ import com.privatevpn.app.ui.components.AppSection
 import com.privatevpn.app.ui.components.InlineStatusLabel
 import com.privatevpn.app.ui.components.SectionTone
 import com.privatevpn.app.ui.components.softClickable
+import com.privatevpn.app.ui.location.resolveNoraRegion
 import com.privatevpn.app.ui.theme.AppSpacing
 import com.privatevpn.app.ui.theme.NoraAmber
 import com.privatevpn.app.ui.theme.NoraDanger
@@ -954,7 +955,7 @@ private fun ProfileCard(
     onRenameProfile: () -> Unit
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
-    val countryFlag = remember(profile.displayName) { countryFlagForProfileName(profile.displayName) }
+    val countryFlag = remember(profile.displayName) { resolveNoraRegion(profile.displayName)?.flag }
 
     Surface(
         modifier = Modifier.fillMaxWidth().softClickable(onClick = onSetActiveProfile),
@@ -1715,67 +1716,6 @@ private fun SubscriptionUsageMeter(
             overflow = TextOverflow.Ellipsis
         )
     }
-}
-
-private data class CountryFlagDefinition(
-    val flag: String,
-    val aliases: Set<String>,
-    val phrases: Set<String> = emptySet()
-)
-
-private val countryFlagDefinitions = listOf(
-    CountryFlagDefinition("🇳🇱", setOf("nl", "нл", "netherlands", "nederland", "нидерланды", "голландия", "amsterdam", "амстердам", "rotterdam", "роттердам")),
-    CountryFlagDefinition("🇩🇪", setOf("de", "deu", "ger", "germany", "deutschland", "германия", "berlin", "берлин", "frankfurt", "франкфурт", "munich", "мюнхен", "dusseldorf", "дюссельдорф")),
-    CountryFlagDefinition("🇷🇺", setOf("ru", "rus", "russia", "россия", "рф", "moscow", "москва", "spb", "питер", "петербург", "санкт")),
-    CountryFlagDefinition("🇫🇷", setOf("fr", "fra", "france", "франция", "paris", "париж")),
-    CountryFlagDefinition("🇫🇮", setOf("fi", "fin", "finland", "финляндия", "helsinki", "хельсинки")),
-    CountryFlagDefinition("🇬🇧", setOf("uk", "gb", "gbr", "england", "britain", "великобритания", "англия", "london", "лондон"), setOf("united kingdom")),
-    CountryFlagDefinition("🇺🇸", setOf("us", "usa", "america", "америка", "сша", "newyork", "losangeles", "ny"), setOf("united states", "new york", "лос анджелес")),
-    CountryFlagDefinition("🇮🇪", setOf("ie", "irl", "ireland", "ирландия", "dublin", "дублин")),
-    CountryFlagDefinition("🇮🇹", setOf("it", "ita", "italy", "италия", "rome", "рим", "milan", "милан")),
-    CountryFlagDefinition("🇪🇸", setOf("es", "esp", "spain", "испания", "madrid", "мадрид", "barcelona", "барселона")),
-    CountryFlagDefinition("🇪🇪", setOf("ee", "est", "estonia", "эстония", "tallinn", "таллин")),
-    CountryFlagDefinition("🇱🇹", setOf("lt", "ltu", "lithuania", "литва", "vilnius", "вильнюс")),
-    CountryFlagDefinition("🇱🇻", setOf("lv", "lva", "latvia", "латвия", "riga", "рига")),
-    CountryFlagDefinition("🇵🇱", setOf("pl", "pol", "poland", "польша", "warsaw", "варшава")),
-    CountryFlagDefinition("🇸🇪", setOf("se", "swe", "sweden", "швеция", "stockholm", "стокгольм")),
-    CountryFlagDefinition("🇳🇴", setOf("no", "nor", "norway", "норвегия", "oslo", "осло")),
-    CountryFlagDefinition("🇨🇭", setOf("ch", "che", "switzerland", "швейцария", "zurich", "цюрих")),
-    CountryFlagDefinition("🇦🇹", setOf("at", "aut", "austria", "австрия", "vienna", "вена")),
-    CountryFlagDefinition("🇹🇷", setOf("tr", "tur", "turkey", "турция", "istanbul", "стамбул")),
-    CountryFlagDefinition("🇸🇬", setOf("sg", "sgp", "singapore", "сингапур")),
-    CountryFlagDefinition("🇯🇵", setOf("jp", "jpn", "japan", "япония", "tokyo", "токио")),
-    CountryFlagDefinition("🇨🇦", setOf("ca", "can", "canada", "канада", "toronto", "торонто")),
-    CountryFlagDefinition("🇨🇿", setOf("cz", "cze", "czech", "чехия", "prague", "прага")),
-    CountryFlagDefinition("🇺🇦", setOf("ua", "ukr", "ukraine", "украина", "kyiv", "kiev", "киев")),
-    CountryFlagDefinition("🇧🇾", setOf("by", "blr", "belarus", "беларусь", "минск", "minsk")),
-    CountryFlagDefinition("🇰🇿", setOf("kz", "kaz", "kazakhstan", "казахстан", "almaty", "алматы")),
-    CountryFlagDefinition("🇦🇪", setOf("ae", "uae", "dubai", "дубай", "emirates", "эмираты")),
-    CountryFlagDefinition("🇮🇱", setOf("il", "isr", "israel", "израиль", "telaviv", "тельавив")),
-    CountryFlagDefinition("🇵🇹", setOf("pt", "prt", "portugal", "португалия", "lisbon", "лиссабон")),
-    CountryFlagDefinition("🇩🇰", setOf("dk", "dnk", "denmark", "дания", "copenhagen", "копенгаген")),
-    CountryFlagDefinition("🇧🇪", setOf("be", "bel", "belgium", "бельгия", "brussels", "брюссель")),
-    CountryFlagDefinition("🇷🇴", setOf("ro", "rou", "romania", "румыния", "bucharest", "бухарест")),
-    CountryFlagDefinition("🇧🇬", setOf("bg", "bgr", "bulgaria", "болгария", "sofia", "софия")),
-    CountryFlagDefinition("🇷🇸", setOf("rs", "srb", "serbia", "сербия", "belgrade", "белград")),
-    CountryFlagDefinition("🇬🇷", setOf("gr", "grc", "greece", "греция", "athens", "афины")),
-    CountryFlagDefinition("🇭🇺", setOf("hu", "hun", "hungary", "венгрия", "budapest", "будапешт"))
-)
-
-private fun countryFlagForProfileName(profileName: String): String? {
-    val normalizedName = profileName.lowercase(Locale.ROOT)
-    val tokens = Regex("[\\p{L}\\p{N}]+")
-        .findAll(normalizedName)
-        .map { it.value }
-        .toSet()
-    if (tokens.isEmpty()) return null
-    return countryFlagDefinitions
-        .filter { definition ->
-            definition.aliases.any(tokens::contains) ||
-                definition.phrases.any { phrase -> normalizedName.contains(phrase) }
-        }
-        .map(CountryFlagDefinition::flag)
-        .singleOrNull()
 }
 
 private fun openExternalLink(context: android.content.Context, url: String): Boolean {

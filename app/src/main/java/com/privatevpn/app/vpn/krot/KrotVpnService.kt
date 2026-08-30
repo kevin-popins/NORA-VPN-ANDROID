@@ -31,6 +31,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.UUID
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class KrotVpnService : VpnService() {
@@ -59,6 +60,9 @@ class KrotVpnService : VpnService() {
 
     @Volatile
     private var currentProfileName: String? = null
+
+    @Volatile
+    private var activeRuntimeToken: String? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -97,13 +101,30 @@ class KrotVpnService : VpnService() {
                 }
             }
         }
-        return START_STICKY
+        return START_NOT_STICKY
+    }
+
+    override fun onRevoke() {
+        val runtimeToken = activeRuntimeToken
+        appendRuntimeLog("KRot VPN permission revoked by Android")
+        cleanupResources()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        runtimeToken?.let {
+            VpnRuntimeStateStore.finishRuntimeForOwner(it, VpnConnectionStatus.NO_PERMISSION)
+        }
+        activeRuntimeToken = null
+        VpnQuickSettingsTileService.requestTileStateRefresh(this)
+        stopSelf()
+        super.onRevoke()
     }
 
     override fun onDestroy() {
+        val runtimeToken = activeRuntimeToken
         unregisterNetworkMonitor()
         cleanupResources()
         serviceScope.cancel()
+        updateReadyOrNoPermission(runtimeToken)
+        activeRuntimeToken = null
         super.onDestroy()
     }
 
@@ -138,11 +159,15 @@ class KrotVpnService : VpnService() {
             connectInProgress = true
         }
 
+        val runtimeToken = UUID.randomUUID().toString()
+        activeRuntimeToken = runtimeToken
+        VpnRuntimeStateStore.claimRuntimeOwner(runtimeToken)
+
         handlingFailure = false
         clearRuntimeLog()
         currentProfileName = profileName
         VpnRuntimeStateStore.setLastSelectedProfileName(currentProfileName)
-        VpnRuntimeStateStore.setStatus(VpnConnectionStatus.CONNECTING)
+        VpnRuntimeStateStore.setStatusForOwner(runtimeToken, VpnConnectionStatus.CONNECTING)
         VpnQuickSettingsTileService.requestTileStateRefresh(this)
         ensureNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification())
@@ -173,22 +198,26 @@ class KrotVpnService : VpnService() {
                         failWithError(
                             AppErrors.krotRuntimeStartFailed(
                                 technicalReason = error.message ?: "KRot data-plane loop failed"
-                            )
+                            ),
+                            runtimeToken
                         )
                     }
                 )
                 session = openedSession
                 openedSession.start()
 
-                VpnRuntimeStateStore.setInternalDataPlanePort(null)
-                VpnRuntimeStateStore.setStatus(VpnConnectionStatus.CONNECTED)
-                VpnRuntimeStateStore.startTrafficSampling(applicationInfo.uid)
+                if (!VpnRuntimeStateStore.isRuntimeOwner(runtimeToken)) {
+                    throw IllegalStateException("KRot runtime operation was superseded before connect completed")
+                }
+                VpnRuntimeStateStore.startTrafficSamplingForOwner(runtimeToken, applicationInfo.uid)
+                VpnRuntimeStateStore.setStatusForOwner(runtimeToken, VpnConnectionStatus.CONNECTED)
                 updateForegroundNotification()
             }.onFailure { error ->
                 failWithError(
                     AppErrors.krotRuntimeStartFailed(
                         technicalReason = error.message ?: "Не удалось запустить KRot runtime"
-                    )
+                    ),
+                    runtimeToken
                 )
             }
         } finally {
@@ -199,11 +228,13 @@ class KrotVpnService : VpnService() {
     }
 
     private fun disconnectVpn() {
+        val runtimeToken = activeRuntimeToken
         runCatching {
             cleanupResources()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
-            updateReadyOrNoPermission()
+            updateReadyOrNoPermission(runtimeToken)
+            activeRuntimeToken = null
             VpnQuickSettingsTileService.requestTileStateRefresh(this)
         }.onFailure { error ->
             val appError = AppErrors.krotRuntimeStopFailed(
@@ -295,15 +326,17 @@ class KrotVpnService : VpnService() {
         synchronized(connectLock) {
             connectInProgress = false
         }
+        val runtimeToken = activeRuntimeToken
+        val ownsRuntime = VpnRuntimeStateStore.isRuntimeOwner(runtimeToken)
         val traffic = VpnRuntimeStateStore.traffic.value
-        if (traffic.connectedAtMs != null) {
+        if (ownsRuntime && traffic.connectedAtMs != null) {
             VpnSessionHistoryStore.recordCompletedSession(this, traffic, currentProfileName)
         }
         session?.stop()
         session = null
-        VpnRuntimeStateStore.setInternalDataPlanePort(null)
-        VpnRuntimeStateStore.stopTrafficSampling()
-        VpnRuntimeStateStore.setAppTrafficMode(AppTrafficMode.UNKNOWN)
+        if (runtimeToken != null && ownsRuntime) {
+            VpnRuntimeStateStore.stopTrafficSamplingForOwner(runtimeToken)
+        }
     }
 
     private fun registerNetworkMonitor() {
@@ -350,7 +383,7 @@ class KrotVpnService : VpnService() {
         }
     }
 
-    private fun failWithError(appError: AppError) {
+    private fun failWithError(appError: AppError, runtimeToken: String? = activeRuntimeToken) {
         if (handlingFailure) return
         handlingFailure = true
 
@@ -377,15 +410,28 @@ class KrotVpnService : VpnService() {
         cleanupResources()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
-        VpnRuntimeStateStore.setError(enrichedError.toUiMessage())
+        val errorApplied = runtimeToken?.let {
+            VpnRuntimeStateStore.finishRuntimeErrorForOwner(it, enrichedError.toUiMessage())
+        } ?: false
+        if (runtimeToken == null) {
+            VpnRuntimeStateStore.setError(enrichedError.toUiMessage())
+        } else if (!errorApplied) {
+            Log.i(TAG, "Ignoring stale KRot runtime error from superseded owner")
+        }
+        if (activeRuntimeToken == runtimeToken) {
+            activeRuntimeToken = null
+        }
         VpnQuickSettingsTileService.requestTileStateRefresh(this)
     }
 
-    private fun updateReadyOrNoPermission() {
-        if (VpnService.prepare(this) == null) {
-            VpnRuntimeStateStore.setStatus(VpnConnectionStatus.READY)
+    private fun updateReadyOrNoPermission(runtimeToken: String? = activeRuntimeToken) {
+        val status = if (VpnService.prepare(this) == null) {
+            VpnConnectionStatus.READY
         } else {
-            VpnRuntimeStateStore.setStatus(VpnConnectionStatus.NO_PERMISSION)
+            VpnConnectionStatus.NO_PERMISSION
+        }
+        if (runtimeToken != null) {
+            VpnRuntimeStateStore.finishRuntimeForOwner(runtimeToken, status)
         }
         VpnQuickSettingsTileService.requestTileStateRefresh(this)
     }

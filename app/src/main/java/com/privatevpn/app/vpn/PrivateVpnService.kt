@@ -26,6 +26,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import java.io.File
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -63,6 +64,9 @@ class PrivateVpnService : VpnService() {
 
     @Volatile
     private var currentProfileName: String? = null
+
+    @Volatile
+    private var activeRuntimeToken: String? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -116,15 +120,32 @@ class PrivateVpnService : VpnService() {
                 updateForegroundNotification()
             }
         }
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = super.onBind(intent)
 
+    override fun onRevoke() {
+        val runtimeToken = activeRuntimeToken
+        appendRuntimeLog("VPN permission revoked by Android")
+        cleanupResources()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        runtimeToken?.let {
+            VpnRuntimeStateStore.finishRuntimeForOwner(it, VpnConnectionStatus.NO_PERMISSION)
+        }
+        activeRuntimeToken = null
+        VpnQuickSettingsTileService.requestTileStateRefresh(this)
+        stopSelf()
+        super.onRevoke()
+    }
+
     override fun onDestroy() {
+        val runtimeToken = activeRuntimeToken
         serviceRunning.set(false)
         cleanupResources()
         serviceScope.cancel()
+        updateReadyOrNoPermission(runtimeToken)
+        activeRuntimeToken = null
         super.onDestroy()
     }
 
@@ -177,11 +198,15 @@ class PrivateVpnService : VpnService() {
             connectInProgress = true
         }
 
+        val runtimeToken = UUID.randomUUID().toString()
+        activeRuntimeToken = runtimeToken
+        VpnRuntimeStateStore.claimRuntimeOwner(runtimeToken)
+
         handlingFailure = false
         clearRuntimeLog()
         currentProfileName = profileName
         VpnRuntimeStateStore.setLastSelectedProfileName(currentProfileName)
-        VpnRuntimeStateStore.setStatus(VpnConnectionStatus.CONNECTING)
+        VpnRuntimeStateStore.setStatusForOwner(runtimeToken, VpnConnectionStatus.CONNECTING)
         VpnQuickSettingsTileService.requestTileStateRefresh(this)
         ensureNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification())
@@ -212,7 +237,8 @@ class PrivateVpnService : VpnService() {
                 startBackendProcess(
                     executable = preparedBinary.executable,
                     configFile = configFile,
-                    workingDirectory = preparedBinary.runtimeDir
+                    workingDirectory = preparedBinary.runtimeDir,
+                    runtimeToken = runtimeToken
                 )
 
                 val tun = establishTunInterface(
@@ -230,15 +256,19 @@ class PrivateVpnService : VpnService() {
                     mtu = DEFAULT_MTU
                 ).getOrThrow()
 
-                VpnRuntimeStateStore.setStatus(VpnConnectionStatus.CONNECTED)
-                VpnRuntimeStateStore.startTrafficSampling(applicationInfo.uid)
+                if (!VpnRuntimeStateStore.isRuntimeOwner(runtimeToken)) {
+                    throw IllegalStateException("VPN runtime operation was superseded before connect completed")
+                }
+                VpnRuntimeStateStore.startTrafficSamplingForOwner(runtimeToken, applicationInfo.uid)
+                VpnRuntimeStateStore.setStatusForOwner(runtimeToken, VpnConnectionStatus.CONNECTED)
                 updateForegroundNotification()
             }.onFailure { error ->
                 failWithError(
                     AppErrors.xrayRuntimeStartFailed(
                         technicalReason = error.message
                             ?: "Не удалось запустить backend/data plane для профиля '$profileId'"
-                    )
+                    ),
+                    runtimeToken
                 )
             }
         } finally {
@@ -249,11 +279,13 @@ class PrivateVpnService : VpnService() {
     }
 
     private fun disconnectVpn() {
+        val runtimeToken = activeRuntimeToken
         runCatching {
             cleanupResources()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
-            updateReadyOrNoPermission()
+            updateReadyOrNoPermission(runtimeToken)
+            activeRuntimeToken = null
             VpnQuickSettingsTileService.requestTileStateRefresh(this)
         }.onFailure { error ->
             val appError = AppErrors.xrayRuntimeStopFailed(
@@ -344,7 +376,8 @@ class PrivateVpnService : VpnService() {
     private fun startBackendProcess(
         executable: File,
         configFile: File,
-        workingDirectory: File
+        workingDirectory: File,
+        runtimeToken: String
     ) {
         stopBackendProcess()
         val launchResult = xrayBackendLauncher.start(
@@ -355,7 +388,7 @@ class PrivateVpnService : VpnService() {
         val process = launchResult.process
         backendProcess = process
         startBackendLogReader(process)
-        startBackendExitWatcher(process)
+        startBackendExitWatcher(process, runtimeToken)
         appendRuntimeLog("Xray backend запущен: ${launchResult.command.joinToString(" ")}")
     }
 
@@ -382,8 +415,10 @@ class PrivateVpnService : VpnService() {
         synchronized(connectLock) {
             connectInProgress = false
         }
+        val runtimeToken = activeRuntimeToken
+        val ownsRuntime = VpnRuntimeStateStore.isRuntimeOwner(runtimeToken)
         val traffic = VpnRuntimeStateStore.traffic.value
-        if (traffic.connectedAtMs != null) {
+        if (ownsRuntime && traffic.connectedAtMs != null) {
             VpnSessionHistoryStore.recordCompletedSession(this, traffic, currentProfileName)
         }
         dataPlaneManager.stop()
@@ -392,9 +427,9 @@ class PrivateVpnService : VpnService() {
             tunInterface?.close()
         }
         tunInterface = null
-        VpnRuntimeStateStore.setInternalDataPlanePort(null)
-        VpnRuntimeStateStore.stopTrafficSampling()
-        VpnRuntimeStateStore.setAppTrafficMode(AppTrafficMode.UNKNOWN)
+        if (runtimeToken != null && ownsRuntime) {
+            VpnRuntimeStateStore.stopTrafficSamplingForOwner(runtimeToken)
+        }
     }
 
     private fun writeRuntimeConfig(runtimeConfig: String, runtimeDir: File): File {
@@ -421,19 +456,18 @@ class PrivateVpnService : VpnService() {
         }
     }
 
-    private fun startBackendExitWatcher(process: Process) {
+    private fun startBackendExitWatcher(process: Process, runtimeToken: String) {
         backendExitWatcher?.interrupt()
         backendExitWatcher = Thread {
             runCatching {
                 val exitCode = process.waitFor()
                 if (process != backendProcess) return@runCatching
-                if (VpnRuntimeStateStore.status.value == VpnConnectionStatus.CONNECTED ||
-                    VpnRuntimeStateStore.status.value == VpnConnectionStatus.CONNECTING
-                ) {
+                if (VpnRuntimeStateStore.isRuntimeOwner(runtimeToken)) {
                     failWithError(
                         AppErrors.xrayRuntimeStartFailed(
                             technicalReason = "Xray backend неожиданно завершился с кодом $exitCode"
-                        )
+                        ),
+                        runtimeToken
                     )
                 }
             }
@@ -467,7 +501,7 @@ class PrivateVpnService : VpnService() {
         }
     }
 
-    private fun failWithError(appError: AppError) {
+    private fun failWithError(appError: AppError, runtimeToken: String? = activeRuntimeToken) {
         if (handlingFailure) return
         handlingFailure = true
 
@@ -500,15 +534,28 @@ class PrivateVpnService : VpnService() {
         cleanupResources()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
-        VpnRuntimeStateStore.setError(enrichedError.toUiMessage())
+        val errorApplied = runtimeToken?.let {
+            VpnRuntimeStateStore.finishRuntimeErrorForOwner(it, enrichedError.toUiMessage())
+        } ?: false
+        if (runtimeToken == null) {
+            VpnRuntimeStateStore.setError(enrichedError.toUiMessage())
+        } else if (!errorApplied) {
+            Log.i(TAG, "Ignoring stale runtime error from superseded owner")
+        }
+        if (activeRuntimeToken == runtimeToken) {
+            activeRuntimeToken = null
+        }
         VpnQuickSettingsTileService.requestTileStateRefresh(this)
     }
 
-    private fun updateReadyOrNoPermission() {
-        if (VpnService.prepare(this) == null) {
-            VpnRuntimeStateStore.setStatus(VpnConnectionStatus.READY)
+    private fun updateReadyOrNoPermission(runtimeToken: String? = activeRuntimeToken) {
+        val status = if (VpnService.prepare(this) == null) {
+            VpnConnectionStatus.READY
         } else {
-            VpnRuntimeStateStore.setStatus(VpnConnectionStatus.NO_PERMISSION)
+            VpnConnectionStatus.NO_PERMISSION
+        }
+        if (runtimeToken != null) {
+            VpnRuntimeStateStore.finishRuntimeForOwner(runtimeToken, status)
         }
         VpnQuickSettingsTileService.requestTileStateRefresh(this)
     }

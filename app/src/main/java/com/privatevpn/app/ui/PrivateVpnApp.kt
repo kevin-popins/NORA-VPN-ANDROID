@@ -181,6 +181,7 @@ fun PrivateVpnApp(
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
+                appViewModel.refreshVpnPermissionState()
                 appViewModel.refreshNotificationPermissionState()
             }
         }
@@ -394,7 +395,10 @@ fun PrivateVpnApp(
                     onSetSubscriptionAutoUpdate = appViewModel::setSubscriptionAutoUpdate,
                     onSetSubscriptionInterval = appViewModel::setSubscriptionInterval,
                     onSetSubscriptionEnabled = appViewModel::setSubscriptionEnabled,
-                    onSetActiveProfile = appViewModel::setActiveProfile,
+                    onSetActiveProfile = { profileId ->
+                        appViewModel.setActiveProfile(profileId)
+                        navigateToTopLevel(AppDestination.Home)
+                    },
                     onDeleteProfile = appViewModel::deleteProfile,
                     onRenameProfile = appViewModel::renameProfile,
                     onClearError = appViewModel::clearError,
