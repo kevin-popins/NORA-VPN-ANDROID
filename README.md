@@ -17,6 +17,7 @@
   </p>
   <p>
     <a href="#русская-версия">Русский</a> ·
+    <a href="#english-version">English</a> ·
     <a href="https://github.com/kevin-popins/NORA-VPN-DESKTOP">Версия для Windows</a> ·
     <a href="docs/krot-android.md">KRot</a>
   </p>
@@ -98,3 +99,73 @@ Android-версия продолжает визуальный стиль NORA V
 ### Лицензия
 
 Проект распространяется по лицензии **Apache License 2.0**. Полный текст: [LICENSE](LICENSE).
+
+## English version
+
+### About the project
+
+**NORA VPN** is an Android VPN client that brings direct profiles, subscriptions, server selection, split tunneling, traffic statistics, and system connection controls together in one clear interface.
+
+One of the project's key goals is secure per-app VPN operation. In some VPN clients, a local SOCKS5 proxy may become a bypass channel that allows an application outside the VPN to discover the VPN server's public IP address. NORA VPN automatically generates protected localhost SOCKS credentials and does not expose this channel to applications outside the split tunnel. No manual SOCKS setup is required on first launch.
+
+The protection has been tested with open-source tools:
+
+- [YourVPNDead](https://github.com/loop-uh/yourvpndead).
+- [ProxyBypass (per-app-split-bypass-poc)](https://github.com/runetfreedom/per-app-split-bypass-poc).
+
+The vulnerability class is described in this [Habr article](https://habr.com/ru/articles/1020080/). A third-party application may still detect that a VPN is active through indirect signals; NORA VPN's goal is to prevent a local bypass channel from revealing the VPN server's exit IP address.
+
+The Android edition continues the visual identity of NORA VPN for Windows. The desktop application is available in the [NORA-VPN-DESKTOP](https://github.com/kevin-popins/NORA-VPN-DESKTOP) repository.
+
+### Features
+
+- **KRot** connections.
+- **Xray / VLESS / REALITY** connections.
+- **AmneziaWG 2.0** connections.
+- Import of direct profiles, configuration files, and subscriptions.
+- Profile import through Android **Open with...** and **Share** actions.
+- Manual and automatic subscription updates.
+- Server selection and latency measurement.
+- Split tunneling for selected applications.
+- Live VPN traffic statistics and session history.
+- Profile-provided and custom DNS servers.
+- Automatically configured authenticated localhost SOCKS.
+- Quick controls through an Android Quick Settings tile and system notification.
+- HAPP/Marzban subscriptions and HAPP `crypt5` support.
+
+### Supported import formats
+
+- `nora1.` — KRot connection key.
+- `vless://`.
+- `vmess://`.
+- `trojan://`.
+- `happ://crypt5/...`.
+- `happ://routing/add/...` and `happ://routing/onadd/...`.
+- Xray JSON.
+- AmneziaWG 2.0 (`.conf`).
+- HTTP(S) subscriptions.
+
+### Getting started
+
+1. Install and open NORA VPN.
+2. Tap `+` and add a key, profile, configuration file, or subscription.
+3. Select a server.
+4. Tap the connection button and approve the Android VPN permission request.
+
+### Documentation
+
+- [Installation](README_INSTALL_RU.md) (Russian).
+- [Application architecture](docs/architecture.md) (Russian).
+- [KRot on Android](docs/krot-android.md) (Russian).
+- [Subscriptions and compatibility](docs/subscriptions.md) (Russian).
+- [Deep-link integration](docs/deep-links.md).
+- [Error codes](docs/error-codes.md) (Russian).
+- [Security](docs/security.md) (Russian).
+
+### Project status
+
+NORA VPN is a working pre-release project. Development is ongoing, with compatibility for new formats and providers expanding over time.
+
+### License
+
+The project is distributed under the **Apache License 2.0**. See the complete text in [LICENSE](LICENSE).
