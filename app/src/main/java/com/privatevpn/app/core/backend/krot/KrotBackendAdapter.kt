@@ -30,6 +30,7 @@ class KrotBackendAdapter(
         socksSettings: SocksSettings
     ): Result<BackendStartResult> {
         return runCatching {
+            check(profile.isConnectable) { "Запись недоступна для подключения" }
             if (VpnService.prepare(context) != null) {
                 VpnRuntimeStateStore.setStatus(VpnConnectionStatus.NO_PERMISSION)
                 throw AppException(

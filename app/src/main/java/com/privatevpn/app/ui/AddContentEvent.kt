@@ -8,7 +8,9 @@ sealed interface AddedServerTarget {
 sealed interface AddContentEvent {
     data class Success(
         val target: AddedServerTarget,
-        val message: String
+        val message: String,
+        val qrSession: Long? = null,
+        val clearManualDraft: Boolean = true
     ) : AddContentEvent
 
     data class Failure(val message: String) : AddContentEvent

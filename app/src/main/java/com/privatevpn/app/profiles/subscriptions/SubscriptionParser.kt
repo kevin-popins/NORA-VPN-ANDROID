@@ -40,9 +40,9 @@ class SubscriptionParser(
                 if (draft.isPartialImport) {
                     warnings += "Элемент #${index + 1} импортирован частично"
                 }
-            }.onFailure { error ->
+            }.onFailure {
                 invalidCount += 1
-                warnings += "Элемент #${index + 1} пропущен: ${error.message ?: "ошибка"}"
+                warnings += "Элемент #${index + 1} пропущен: некорректный формат профиля"
             }
         }
 

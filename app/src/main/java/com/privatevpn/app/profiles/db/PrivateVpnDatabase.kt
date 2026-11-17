@@ -58,7 +58,8 @@ abstract class PrivateVpnDatabase : RoomDatabase() {
                 context.applicationContext,
                 PrivateVpnDatabase::class.java,
                 DB_NAME
-            ).addMigrations(MIGRATION_1_2)
+            ).enableMultiInstanceInvalidation()
+                .addMigrations(MIGRATION_1_2)
                 .build()
         }
     }

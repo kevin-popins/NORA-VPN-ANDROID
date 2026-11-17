@@ -27,6 +27,7 @@ class XrayBackendAdapter(
         socksSettings: SocksSettings
     ): Result<BackendStartResult> {
         return runCatching {
+            check(profile.isConnectable) { "Запись недоступна для подключения" }
             val normalized = configNormalizer.normalize(profile)
             val dataPlaneProxy = createDataPlaneProxy(excludePort = socksSettings.port.takeIf { socksSettings.enabled })
             val runtime = runtimeConfigPreparer.prepare(
@@ -45,6 +46,7 @@ class XrayBackendAdapter(
                     runtimeConfig = runtime.runtimeConfig,
                     profileId = profile.id,
                     profileName = profile.displayName,
+                    endpointProtectionEnabled = profile.endpointProtectionEnabled,
                     privateSessionEnabled = privateSessionEnabled,
                     trustedPackages = privateSessionTrustedPackages,
                     dataPlane = TunnelDataPlaneOptions(

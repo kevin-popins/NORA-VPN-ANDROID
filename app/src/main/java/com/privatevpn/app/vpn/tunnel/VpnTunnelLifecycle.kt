@@ -14,7 +14,8 @@ data class TunnelConnectRequest(
     val profileName: String?,
     val privateSessionEnabled: Boolean,
     val trustedPackages: Set<String>,
-    val dataPlane: TunnelDataPlaneOptions
+    val dataPlane: TunnelDataPlaneOptions,
+    val endpointProtectionEnabled: Boolean = false
 )
 
 interface VpnTunnelLifecycle {

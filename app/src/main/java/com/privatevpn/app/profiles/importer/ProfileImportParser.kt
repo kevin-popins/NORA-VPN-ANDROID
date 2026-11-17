@@ -491,7 +491,7 @@ class ProfileImportParser {
     }
 
     private fun normalize(input: String): String {
-        return input.removePrefix("\uFEFF")
+        return ImportInputNormalizer.normalize(input)
     }
 
     private fun Uri.queryParameterValue(vararg names: String): String? {

@@ -10,6 +10,8 @@ import com.privatevpn.app.profiles.db.PrivateVpnDatabase
 import com.privatevpn.app.profiles.db.ProfileDao
 import com.privatevpn.app.profiles.db.SubscriptionSourceDao
 import com.privatevpn.app.profiles.importer.ProfileImportParser
+import com.privatevpn.app.profiles.importer.ImportInputNormalizer
+import com.privatevpn.app.profiles.model.SubscriptionClientPolicy
 import com.privatevpn.app.profiles.model.SubscriptionMetadataCodec
 import com.privatevpn.app.profiles.model.SubscriptionSource
 import com.privatevpn.app.profiles.model.SubscriptionSourceType
@@ -19,9 +21,16 @@ import com.privatevpn.app.profiles.model.VpnProfile
 import com.privatevpn.app.profiles.model.ImportedProfileDraft
 import com.privatevpn.app.profiles.repository.toDomain
 import com.privatevpn.app.profiles.repository.toEntity
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import java.io.InputStream
 import java.net.HttpURLConnection
@@ -32,6 +41,7 @@ import java.security.MessageDigest
 import java.util.Base64
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.zip.GZIPInputStream
 import org.json.JSONArray
 import org.json.JSONObject
@@ -41,19 +51,31 @@ class RoomSubscriptionRepository(
     private val appContext: Context? = null,
     private val profileDao: ProfileDao = database.profileDao(),
     private val subscriptionSourceDao: SubscriptionSourceDao = database.subscriptionSourceDao(),
-    private val parser: SubscriptionParser = SubscriptionParser(ProfileImportParser())
+    private val parser: SubscriptionParser = SubscriptionParser(ProfileImportParser()),
+    private val httpConnectionFactory: (URL) -> HttpURLConnection = { it.openConnection() as HttpURLConnection },
+    private val compatibilityHwidProvider: (() -> String?)? = null,
+    private val clock: () -> Long = System::currentTimeMillis,
+    private val technicalEntryMatcher: (String, String?) -> Boolean = { raw, normalized ->
+        SubscriptionServiceRecords.isKnownTechnicalEntry(raw, normalized)
+    }
 ) : SubscriptionRepository {
 
     override val subscriptions: Flow<List<SubscriptionSource>> =
         subscriptionSourceDao.observeAll().map { entities -> entities.map { it.toDomain() } }
 
-    override suspend fun addSubscription(sourceUrl: String, displayName: String?): SubscriptionSource {
-        val normalizedUrl = HappCrypt5Decryptor.decryptIfNeeded(sourceUrl)
-        require(normalizedUrl.startsWith("http://") || normalizedUrl.startsWith("https://")) {
-            "URL подписки должен начинаться с http:// или https://"
-        }
+    override suspend fun addSubscription(sourceUrl: String, displayName: String?): SubscriptionSource =
+        addSubscriptionPrepared(sourceUrl, displayName) { }
+
+    private suspend fun addSubscriptionPrepared(
+        sourceUrl: String,
+        displayName: String?,
+        onPrepared: (SubscriptionSource) -> Unit
+    ): SubscriptionSource {
+        val normalizedUrl = SubscriptionUrlValidator.validate(
+            ImportInputNormalizer.normalize(HappCrypt5Decryptor.decryptIfNeeded(ImportInputNormalizer.normalize(sourceUrl)))
+        )
         val providerName = extractProviderName(normalizedUrl)
-        val now = System.currentTimeMillis()
+        val now = clock()
         val source = SubscriptionSource(
             id = UUID.randomUUID().toString(),
             displayName = displayName?.trim()?.takeIf { it.isNotBlank() } ?: normalizedUrl,
@@ -83,9 +105,77 @@ class RoomSubscriptionRepository(
             createdAtMs = now,
             updatedAtMs = now
         )
+        onPrepared(source)
         subscriptionSourceDao.upsert(source.toEntity())
         return source
     }
+
+    /** QR/direct validated import: no success is exposed until fresh content is committed. */
+    override suspend fun importValidatedSubscription(sourceUrl: String, displayName: String?): SubscriptionSource {
+        val normalizedUrl = try {
+            SubscriptionUrlValidator.validate(ImportInputNormalizer.normalize(
+                HappCrypt5Decryptor.decryptIfNeeded(ImportInputNormalizer.normalize(sourceUrl))
+            ))
+        } catch (error: Throwable) {
+            if (error is CancellationException) throw error
+            throw SubscriptionImportException(SubscriptionImportFailure.INVALID_INPUT)
+        }
+        val sourceKey = subscriptionIdentityKey(normalizedUrl)
+        return importLocks.getOrPut(sourceKey) { Mutex() }.withLock {
+            var provisionalId: String? = null
+            try {
+                currentCoroutineContext().ensureActive()
+                val existing = subscriptionSourceDao.observeAll().first().map { it.toDomain() }
+                    .filter { subscriptionIdentityKey(it.sourceUrl) == sourceKey }
+                    .sortedWith(compareByDescending<SubscriptionSource> { it.profileCount > 0 || it.lastSuccessAtMs != null }
+                        .thenBy { it.createdAtMs })
+                    .firstOrNull()
+                val source = existing ?: addSubscriptionPrepared(normalizedUrl, displayName) { provisionalId = it.id }
+                refreshLocks.getOrPut(source.id) { Mutex() }.withLock {
+                    val before = subscriptionSourceDao.findById(source.id)
+                        ?: throw SubscriptionImportException(SubscriptionImportFailure.STORAGE_ERROR)
+                    if (!before.enabled) throw SubscriptionImportException(SubscriptionImportFailure.DISABLED)
+                    val result = refreshSubscriptionLocked(source.id, force = true, requireValidatedImport = true)
+                    if (!result.acceptance.accepted) throw SubscriptionImportException(SubscriptionImportFailure.VALIDATION_FAILED)
+                    subscriptionSourceDao.findById(source.id)?.toDomain()
+                        ?: throw SubscriptionImportException(SubscriptionImportFailure.STORAGE_ERROR)
+                }
+            } catch (error: Throwable) {
+                var cleanupFailed = false
+                try {
+                    provisionalId?.let { id ->
+                        withContext(NonCancellable) {
+                            refreshLocks.getOrPut(id) { Mutex() }.withLock {
+                                database.withTransaction {
+                                    val current = subscriptionSourceDao.findById(id)?.toDomain()
+                                    val hasChildren = profileDao.findBySubscriptionId(id).isNotEmpty()
+                                    if (current != null && !hasChildren && current.lastSuccessAtMs == null) {
+                                        subscriptionSourceDao.deleteById(id)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch (_: Throwable) {
+                    cleanupFailed = true
+                }
+                when {
+                    error is CancellationException -> throw error
+                    cleanupFailed -> throw SubscriptionImportException(SubscriptionImportFailure.STORAGE_ERROR)
+                    error is SubscriptionImportException -> throw error
+                    else -> throw SubscriptionImportException(SubscriptionImportFailure.STORAGE_ERROR)
+                }
+            }
+        }
+    }
+
+    private fun subscriptionIdentityKey(value: String): String = runCatching {
+        val uri = java.net.URI(value)
+        val scheme = uri.scheme.lowercase(Locale.US)
+        val port = if (uri.port == -1 || (scheme == "https" && uri.port == 443) || (scheme == "http" && uri.port == 80)) "" else ":${uri.port}"
+        "$scheme://${uri.host.lowercase(Locale.US)}$port${uri.rawPath.orEmpty()}" +
+            (uri.rawQuery?.let { "?$it" } ?: "")
+    }.getOrDefault(value)
 
     override suspend fun deleteSubscription(subscriptionId: String) {
         database.withTransaction {
@@ -101,7 +191,7 @@ class RoomSubscriptionRepository(
         subscriptionSourceDao.upsert(
             current.copy(
                 displayName = normalizedName,
-                updatedAtMs = System.currentTimeMillis()
+                updatedAtMs = clock()
             ).toEntity()
         )
     }
@@ -111,7 +201,7 @@ class RoomSubscriptionRepository(
         subscriptionSourceDao.upsert(
             current.copy(
                 isCollapsed = !current.isCollapsed,
-                updatedAtMs = System.currentTimeMillis()
+                updatedAtMs = clock()
             ).toEntity()
         )
     }
@@ -123,7 +213,7 @@ class RoomSubscriptionRepository(
             current.copy(
                 enabled = enabled,
                 syncStatus = status,
-                updatedAtMs = System.currentTimeMillis()
+                updatedAtMs = clock()
             ).toEntity()
         )
     }
@@ -133,7 +223,7 @@ class RoomSubscriptionRepository(
         subscriptionSourceDao.upsert(
             current.copy(
                 autoUpdateEnabled = enabled,
-                updatedAtMs = System.currentTimeMillis()
+                updatedAtMs = clock()
             ).toEntity()
         )
     }
@@ -144,7 +234,7 @@ class RoomSubscriptionRepository(
         subscriptionSourceDao.upsert(
             current.copy(
                 updateIntervalMinutes = normalized,
-                updatedAtMs = System.currentTimeMillis()
+                updatedAtMs = clock()
             ).toEntity()
         )
     }
@@ -154,12 +244,17 @@ class RoomSubscriptionRepository(
         subscriptionSourceDao.upsert(
             current.copy(
                 lastSelectedProfileId = profileId?.trim()?.takeIf { it.isNotBlank() },
-                updatedAtMs = System.currentTimeMillis()
+                updatedAtMs = clock()
             ).toEntity()
         )
     }
 
-    override suspend fun refreshSubscription(subscriptionId: String, force: Boolean): SubscriptionRefreshResult {
+    override suspend fun refreshSubscription(subscriptionId: String, force: Boolean): SubscriptionRefreshResult =
+        refreshLocks.getOrPut(subscriptionId) { Mutex() }.withLock {
+            refreshSubscriptionLocked(subscriptionId, force)
+        }
+
+    private suspend fun refreshSubscriptionLocked(subscriptionId: String, force: Boolean, requireValidatedImport: Boolean = false): SubscriptionRefreshResult {
         val source = subscriptionSourceDao.findById(subscriptionId)?.toDomain()
             ?: return SubscriptionRefreshResult(
                 subscriptionId = subscriptionId,
@@ -191,6 +286,7 @@ class RoomSubscriptionRepository(
         var logoHint = meta.logoHint
         var labelLine = meta.labelLine
         var providerMessage = meta.providerMessage
+        var clientPolicy = meta.clientPolicy
         val configuredClientMode = SubscriptionClientMode.fromWireValue(meta.clientMode)
         var persistedClientMode = configuredClientMode
         val platformHints = meta.platformHints.toMutableSet()
@@ -198,12 +294,14 @@ class RoomSubscriptionRepository(
         var diagnostics = meta.diagnostics ?: SubscriptionSyncDiagnostics()
 
         if (!source.enabled) {
-            subscriptionSourceDao.upsert(
-                source.copy(
-                    syncStatus = SubscriptionSyncStatus.DISABLED,
-                    updatedAtMs = System.currentTimeMillis()
-                ).toEntity()
-            )
+            if (!requireValidatedImport) {
+                subscriptionSourceDao.upsert(
+                    source.copy(
+                        syncStatus = SubscriptionSyncStatus.DISABLED,
+                        updatedAtMs = clock()
+                    ).toEntity()
+                )
+            }
             return SubscriptionRefreshResult(
                 subscriptionId = subscriptionId,
                 status = SubscriptionSyncStatus.DISABLED,
@@ -213,7 +311,7 @@ class RoomSubscriptionRepository(
             )
         }
 
-        if (!force && !isDueForAutoUpdate(source, System.currentTimeMillis())) {
+        if (!force && !isDueForAutoUpdate(source, clock())) {
             return SubscriptionRefreshResult(
                 subscriptionId = subscriptionId,
                 status = source.syncStatus,
@@ -223,31 +321,44 @@ class RoomSubscriptionRepository(
             )
         }
 
-        val startedAt = System.currentTimeMillis()
-        subscriptionSourceDao.upsert(
-            source.copy(
-                syncStatus = SubscriptionSyncStatus.LOADING,
-                lastUpdatedAtMs = startedAt,
-                updatedAtMs = startedAt
-            ).toEntity()
-        )
+        val startedAt = clock()
+        if (!requireValidatedImport) {
+            subscriptionSourceDao.upsert(
+                source.copy(
+                    syncStatus = SubscriptionSyncStatus.LOADING,
+                    lastUpdatedAtMs = startedAt,
+                    updatedAtMs = startedAt
+                ).toEntity()
+            )
+        }
 
-        Log.i(TAG, "refresh start id=$subscriptionId, provider=$providerName")
+        Log.i(TAG, "refresh start id=$subscriptionId")
 
         return runCatching {
+            currentCoroutineContext().ensureActive()
+            val previousChildProfiles = profileDao.findBySubscriptionId(subscriptionId).map { it.toDomain() }
             val compatibilityHwid = resolveCompatibilityHwid()
             var selectedAttempt = buildInitialFetchAttempt(
                 sourceUrl = source.sourceUrl,
                 mode = configuredClientMode,
                 compatibilityHwid = compatibilityHwid
             )
-            var response = fetchSubscriptionPayload(
-                attempt = selectedAttempt,
-                etag = source.etag,
-                lastModified = source.lastModified,
-                useConditionalCache = true
+            var initialFailure: Throwable? = null
+            var response = runCatching {
+                fetchSubscriptionPayload(selectedAttempt, source.etag, source.lastModified, !force)
+            }.getOrElse { error ->
+                if (error is CancellationException) throw error
+                initialFailure = error
+                SubscriptionHttpResponse(0, "", 0, null, emptyMap(), "", null, null, null, false,
+                    selectedAttempt.endpointUrl, emptyList())
+            }
+            var selectedIncomingPolicy: SubscriptionClientPolicy? = null
+            fun incomingPolicy(http: SubscriptionHttpResponse) = SubscriptionClientPolicyReader.read(
+                http.metadataHeaderValues, source.sourceUrl, http.finalUrl, http.statusCode, clock()
             )
+            val firstPolicy = incomingPolicy(response)
             val firstHeaderMeta = extractProviderMetadata(response.headers)
+            var selectedHeaderMeta = firstHeaderMeta
             resolvedTitle = firstHeaderMeta.displayTitle ?: resolvedTitle
             providerName = firstHeaderMeta.providerName ?: providerName
             providerDomain = firstHeaderMeta.providerDomain ?: providerDomain
@@ -291,12 +402,15 @@ class RoomSubscriptionRepository(
 
             Log.i(
                 TAG,
-                "http id=$subscriptionId mode=${configuredClientMode.wireValue} endpoint=${selectedAttempt.endpointUrl} " +
+                "http id=$subscriptionId mode=${configuredClientMode.wireValue} endpoint=${selectedAttempt.endpointVariant} " +
                     "status=${response.statusCode} type=${response.contentType ?: "-"} " +
-                    "len=${response.bodyLength} headers='${response.headersSummary}' preview='${response.bodyPreview ?: "-"}'"
+                    "len=${response.bodyLength}"
             )
 
             if (response.notModified) {
+                require(!requireValidatedImport) { "Validated import requires a fresh body" }
+                // A 304 has no validated new body and never adopts metadata or extends its TTL.
+                clientPolicy = meta.clientPolicy
                 val notModifiedDiagnostics = diagnostics.copy(
                     detectedFormat = diagnostics.detectedFormat ?: "unchanged",
                     discoveredEntries = source.profileCount,
@@ -339,7 +453,8 @@ class RoomSubscriptionRepository(
                         logoHint = logoHint,
                         tags = tags.toList(),
                         labelLine = labelLine,
-                        providerMessage = providerMessage
+                        providerMessage = providerMessage,
+                        clientPolicy = clientPolicy
                     ),
                     updatedAtMs = startedAt
                 )
@@ -354,18 +469,21 @@ class RoomSubscriptionRepository(
             }
 
             val body = response.body.orEmpty()
-            require(body.isNotBlank()) { "Сервер подписки вернул пустой ответ" }
-
-            var parsedData = parseSubscriptionPayload(
-                subscription = source,
-                body = body,
-                headers = response.headers,
-                importedAt = startedAt
-            )
-            logShortIdTraceStage1And2(
-                subscriptionId = subscriptionId,
-                drafts = parsedData.parseResult.validProfiles
-            )
+            val initialMetadataAcceptable = response.metadataHeaderValues.isEmpty() ||
+                SubscriptionClientPolicyReader.canAdopt(meta.clientPolicy, firstPolicy)
+            if (!initialMetadataAcceptable) initialFailure = IllegalArgumentException("Invalid or conflicting subscription metadata")
+            var parsedData = runCatching {
+                parseSubscriptionPayload(source, if (initialMetadataAcceptable) body else "", response.headers, startedAt, previousChildProfiles)
+            }.getOrElse { error ->
+                if (error is CancellationException) throw error
+                initialFailure = error
+                parseSubscriptionPayload(source, "", emptyMap(), startedAt, previousChildProfiles)
+            }
+            if (response.metadataHeaderValues.isNotEmpty() && response.statusCode == 200 && !isPolicyBodyValidated(parsedData)) {
+                initialFailure = IllegalArgumentException("Incomplete authoritative subscription body")
+                parsedData = parseSubscriptionPayload(source, "", emptyMap(), startedAt, previousChildProfiles)
+            }
+            if (isPolicyBodyValidated(parsedData)) selectedIncomingPolicy = firstPolicy
             var selectedBodySignature = bodySignature(body)
             providerSite = parsedData.providerSite ?: providerSite
             platformHints += parsedData.platformHints
@@ -407,7 +525,8 @@ class RoomSubscriptionRepository(
                 var bestAttempt = selectedAttempt
                 var bestHeaderMeta = firstHeaderMeta
 
-                retryAttempts.forEach { attempt ->
+                for (attempt in retryAttempts) {
+                    currentCoroutineContext().ensureActive()
                     val retryResponse = runCatching {
                         fetchSubscriptionPayload(
                             attempt = attempt,
@@ -416,57 +535,41 @@ class RoomSubscriptionRepository(
                             useConditionalCache = false
                         )
                     }.onFailure { error ->
+                        if (error is CancellationException) throw error
                         Log.w(
                             TAG,
-                            "compat retry failed id=$subscriptionId endpoint=${attempt.endpointUrl} mode=${attempt.clientMode.wireValue}: ${error.message}"
+                            "compat retry failed id=$subscriptionId endpoint=${attempt.endpointVariant} mode=${attempt.clientMode.wireValue} type=${error::class.java.simpleName}"
                         )
-                    }.getOrNull() ?: return@forEach
+                    }.getOrNull() ?: continue
 
+                    val retryPolicy = incomingPolicy(retryResponse)
+                    if (retryResponse.metadataHeaderValues.isNotEmpty() && !SubscriptionClientPolicyReader.canAdopt(meta.clientPolicy, retryPolicy)) continue
                     if (retryResponse.notModified || retryResponse.body.isNullOrBlank()) {
                         Log.i(
                             TAG,
                             "attempt skipped id=$subscriptionId source=${attempt.endpointVariant} status=${retryResponse.statusCode} " +
                                 "reason=${if (retryResponse.notModified) "not-modified" else "empty-body"}"
                         )
-                        return@forEach
+                        continue
                     }
 
                     val retryHeaderMeta = extractProviderMetadata(retryResponse.headers)
-                    resolvedTitle = retryHeaderMeta.displayTitle ?: resolvedTitle
-                    providerName = retryHeaderMeta.providerName ?: providerName
-                    providerDomain = retryHeaderMeta.providerDomain ?: providerDomain
-                    providerSite = retryHeaderMeta.providerSite ?: providerSite
-                    supportUrl = retryHeaderMeta.supportUrl ?: supportUrl
-                    profileWebPageUrl = retryHeaderMeta.profileWebPageUrl ?: profileWebPageUrl
-                    announcementText = retryHeaderMeta.announcementText ?: announcementText
-                    planId = retryHeaderMeta.planId ?: planId
-                    userId = retryHeaderMeta.userId ?: userId
-                    note = retryHeaderMeta.note ?: note
-                    badgeText = retryHeaderMeta.badgeText ?: badgeText
-                    trafficUploadBytes = retryHeaderMeta.trafficUploadBytes ?: trafficUploadBytes
-                    trafficDownloadBytes = retryHeaderMeta.trafficDownloadBytes ?: trafficDownloadBytes
-                    trafficTotalBytes = retryHeaderMeta.trafficTotalBytes ?: trafficTotalBytes
-                    trafficRemainingBytes = retryHeaderMeta.trafficRemainingBytes ?: trafficRemainingBytes
-                    expireAt = retryHeaderMeta.expireAt ?: expireAt
-                    expireText = retryHeaderMeta.expireText ?: expireText
-                    logoUrl = retryHeaderMeta.logoUrl ?: logoUrl
-                    logoHint = retryHeaderMeta.logoHint ?: logoHint
-                    labelLine = retryHeaderMeta.labelLine ?: labelLine
-                    providerMessage = retryHeaderMeta.providerMessage ?: providerMessage
-                    tags += retryHeaderMeta.tags
-                    platformHints += retryHeaderMeta.platformHints
-
-                    val retryParsed = parseSubscriptionPayload(
-                        subscription = source,
-                        body = retryResponse.body.orEmpty(),
-                        headers = retryResponse.headers,
-                        importedAt = startedAt
-                    )
+                    val retryParsed = runCatching {
+                        parseSubscriptionPayload(
+                            subscription = source,
+                            body = retryResponse.body.orEmpty(),
+                            headers = retryResponse.headers,
+                            importedAt = startedAt,
+                            existingProfiles = previousChildProfiles
+                        )
+                    }.onFailure { error ->
+                        if (error is CancellationException) throw error
+                        Log.w(TAG, "compat retry parse failed source=${attempt.endpointVariant} type=${error::class.java.simpleName}")
+                    }.getOrNull() ?: continue
+                    if (retryResponse.metadataHeaderValues.isNotEmpty() && !isPolicyBodyValidated(retryParsed)) continue
                     val retryQuality = buildParsedDataQuality(retryParsed)
                     val bestQualityBefore = buildParsedDataQuality(bestParsedData)
                     val retryBodySignature = bodySignature(retryResponse.body.orEmpty())
-                    providerSite = retryParsed.providerSite ?: providerSite
-                    platformHints += retryParsed.platformHints
 
                     Log.i(
                         TAG,
@@ -493,6 +596,33 @@ class RoomSubscriptionRepository(
                     )
 
                     if (retryIsBetter) {
+                        resolvedTitle = retryHeaderMeta.displayTitle ?: resolvedTitle
+                        providerName = retryHeaderMeta.providerName ?: providerName
+                        providerDomain = retryHeaderMeta.providerDomain ?: providerDomain
+                        providerSite = retryHeaderMeta.providerSite ?: providerSite
+                        supportUrl = retryHeaderMeta.supportUrl ?: supportUrl
+                        profileWebPageUrl = retryHeaderMeta.profileWebPageUrl ?: profileWebPageUrl
+                        announcementText = retryHeaderMeta.announcementText ?: announcementText
+                        planId = retryHeaderMeta.planId ?: planId
+                        userId = retryHeaderMeta.userId ?: userId
+                        note = retryHeaderMeta.note ?: note
+                        badgeText = retryHeaderMeta.badgeText ?: badgeText
+                        trafficUploadBytes = retryHeaderMeta.trafficUploadBytes ?: trafficUploadBytes
+                        trafficDownloadBytes = retryHeaderMeta.trafficDownloadBytes ?: trafficDownloadBytes
+                        trafficTotalBytes = retryHeaderMeta.trafficTotalBytes ?: trafficTotalBytes
+                        trafficRemainingBytes = retryHeaderMeta.trafficRemainingBytes ?: trafficRemainingBytes
+                        expireAt = retryHeaderMeta.expireAt ?: expireAt
+                        expireText = retryHeaderMeta.expireText ?: expireText
+                        logoUrl = retryHeaderMeta.logoUrl ?: logoUrl
+                        logoHint = retryHeaderMeta.logoHint ?: logoHint
+                        labelLine = retryHeaderMeta.labelLine ?: labelLine
+                        providerMessage = retryHeaderMeta.providerMessage ?: providerMessage
+                        tags += retryHeaderMeta.tags
+                        platformHints += retryHeaderMeta.platformHints
+
+                        providerSite = retryParsed.providerSite ?: providerSite
+                        platformHints += retryParsed.platformHints
+                        selectedIncomingPolicy = retryPolicy
                         bestResponse = retryResponse
                         bestParsedData = retryParsed
                         bestAttempt = attempt
@@ -512,6 +642,7 @@ class RoomSubscriptionRepository(
                     parsedData = bestParsedData
                     selectedAttempt = bestAttempt
                     compatibilityMode = bestMode
+                    selectedHeaderMeta = bestHeaderMeta
                     retryWithHwid = bestAttempt.useHwidHeaders
 
                     diagnostics = diagnostics.copy(
@@ -546,8 +677,43 @@ class RoomSubscriptionRepository(
                     "selectedMarkerCount=${parsedData.markerEntriesCount} selectedBodySignature=$selectedBodySignature"
             )
 
+            currentCoroutineContext().ensureActive()
+            if (parsedData.visibleProfiles.isEmpty() &&
+                (initialFailure != null || response.body.isNullOrBlank())) {
+                throw initialFailure ?: IllegalArgumentException("Empty subscription response")
+            }
+            require(response.statusCode in 200..299) { "HTTP ${response.statusCode} при обновлении подписки." }
+            if (response.metadataHeaderValues.isNotEmpty()) {
+                require(isPolicyBodyValidated(parsedData)) { "Incomplete authoritative subscription body" }
+            }
+            fun validateSelectedPolicyFresh() {
+                if (response.metadataHeaderValues.isEmpty()) return
+                val fresh = incomingPolicy(response)
+                require(SubscriptionClientPolicyReader.canAdopt(meta.clientPolicy, fresh)) { "Expired or conflicting subscription metadata" }
+                require(fresh == selectedIncomingPolicy) { "Subscription metadata changed during validation" }
+            }
+            validateSelectedPolicyFresh()
+            clientPolicy = SubscriptionClientPolicyReader.merge(meta.clientPolicy, selectedIncomingPolicy)
+            val contentAcceptance = SubscriptionContentAcceptance.classify(
+                validatedDisplayBody = isDisplayBodyValidated(parsedData),
+                connectableProfilesCount = parsedData.connectableProfiles.size,
+                technicalEntriesCount = parsedData.technicalProfiles.size
+            )
+            require(!requireValidatedImport || contentAcceptance.accepted) { "Subscription content was not accepted" }
+            providerMessage = when {
+                parsedData.providerMessage != null -> parsedData.providerMessage
+                parsedData.connectableProfiles.isNotEmpty() && (meta.diagnostics?.markerEntries ?: 0) > 0 -> selectedHeaderMeta.providerMessage
+                else -> providerMessage
+            }
             val connectableProfiles = parsedData.connectableProfiles
-            val importedIds = connectableProfiles.map { it.id }
+            val visibleProfiles = parsedData.visibleProfiles
+            val technicalOnly = connectableProfiles.isEmpty() && parsedData.technicalProfiles.isNotEmpty()
+            val profilesToPersist = if (technicalOnly) {
+                val cachedReal = previousChildProfiles.filter { it.isConnectable }
+                parsedData.technicalProfiles.mapIndexed { index, profile -> profile.copy(sourceOrder = index) } +
+                    cachedReal.mapIndexed { index, profile -> profile.copy(sourceOrder = parsedData.technicalProfiles.size + index) }
+            } else visibleProfiles
+            val importedIds = profilesToPersist.map { it.id }
 
             var persistedCount = source.profileCount
             var insertedProfilesCount = 0
@@ -556,7 +722,7 @@ class RoomSubscriptionRepository(
             val duplicateCount = parsedData.duplicateCount
             var syncStatus = resolveSyncStatus(
                 discoveredEntries = parsedData.parseResult.discoveredEntriesCount,
-                validProfiles = connectableProfiles.size,
+                validProfiles = visibleProfiles.size,
                 invalidEntries = parsedData.parseResult.invalidEntriesCount
             )
 
@@ -568,9 +734,9 @@ class RoomSubscriptionRepository(
                 else -> "Подписка обновлена"
             }
 
-            if (connectableProfiles.isEmpty() && parsedData.markerEntriesCount > 0) {
+            if (visibleProfiles.isEmpty() && parsedData.markerEntriesCount > 0) {
                 syncStatus = SubscriptionSyncStatus.EMPTY
-                syncMessage = "Подписка загружена, но содержит только служебные записи"
+                syncMessage = parsedData.providerMessage ?: "Подписка загружена, но содержит только служебные записи"
             }
 
             val parseDiagnostics = diagnostics.copy(
@@ -604,7 +770,7 @@ class RoomSubscriptionRepository(
             Log.i(
                 TAG,
                 "parse id=$subscriptionId format=${parsedData.parseResult.detectedFormat.name.lowercase(Locale.US)} " +
-                    "mode=$compatibilityMode clientMode=${persistedClientMode.wireValue} endpoint=${selectedAttempt.endpointUrl} " +
+                    "mode=$compatibilityMode clientMode=${persistedClientMode.wireValue} endpoint=${selectedAttempt.endpointVariant} " +
                     "variant=${selectedAttempt.endpointVariant} retryWithHwid=$retryWithHwid " +
                     "base64Detected=${parsedData.parseResult.base64Detected} " +
                     "base64Decoded=${parsedData.parseResult.base64Decoded} rawLines=${parsedData.parseResult.rawLineCount} " +
@@ -620,24 +786,26 @@ class RoomSubscriptionRepository(
                     "lineCount=${parsedData.parseResult.rawLineCount} connectableBeforePersistence=${connectableProfiles.size}"
             )
 
-            if (connectableProfiles.isNotEmpty()) {
+            if (profilesToPersist.isNotEmpty()) {
                 var persistedProfilesAfterSave: List<VpnProfile> = emptyList()
                 database.withTransaction {
+                    validateSelectedPolicyFresh()
                     val existingProfilesBefore = profileDao.findBySubscriptionId(subscriptionId).map { it.toDomain() }
                     val existingIdsBefore = existingProfilesBefore.map { it.id }.toSet()
-                    updatedProfilesCount = connectableProfiles.count { existingIdsBefore.contains(it.id) }
-                    insertedProfilesCount = (connectableProfiles.size - updatedProfilesCount).coerceAtLeast(0)
+                    updatedProfilesCount = profilesToPersist.count { existingIdsBefore.contains(it.id) }
+                    insertedProfilesCount = (profilesToPersist.size - updatedProfilesCount).coerceAtLeast(0)
 
                     profileDao.deleteBySubscriptionId(subscriptionId)
-                    profileDao.insertAll(connectableProfiles.map { it.toEntity() })
+                    profileDao.insertAll(profilesToPersist.map { it.toEntity() })
                     val persistedEntities = profileDao.findBySubscriptionId(subscriptionId)
                     persistedCount = persistedEntities.size
                     persistedProfilesAfterSave = persistedEntities.map { it.toDomain() }
 
                     val selectedProfile = source.lastSelectedProfileId
-                        ?.takeIf { importedIds.contains(it) }
-                        ?: importedIds.firstOrNull()
+                        ?.takeIf { id -> profilesToPersist.any { it.id == id && it.isConnectable } }
+                        ?: profilesToPersist.firstOrNull { it.isConnectable }?.id
 
+                    validateSelectedPolicyFresh()
                     subscriptionSourceDao.upsert(
                         source.copy(
                             profileCount = persistedCount,
@@ -687,11 +855,13 @@ class RoomSubscriptionRepository(
                                 logoHint = logoHint,
                                 tags = tags.toList(),
                                 labelLine = labelLine,
-                                providerMessage = providerMessage
+                                providerMessage = providerMessage,
+                                clientPolicy = clientPolicy
                             ),
                             updatedAtMs = startedAt
                         ).toEntity()
                     )
+                    validateSelectedPolicyFresh()
                 }
                 Log.i(
                     TAG,
@@ -699,12 +869,8 @@ class RoomSubscriptionRepository(
                         "insertedProfilesCount=$insertedProfilesCount updatedProfilesCount=$updatedProfilesCount " +
                         "filteredOutCount=$filteredOutCount duplicateCount=$duplicateCount persistedCount=$persistedCount"
                 )
-                logShortIdTraceStage3(
-                    subscriptionId = subscriptionId,
-                    profiles = persistedProfilesAfterSave
-                )
 
-                if (persistedCount != connectableProfiles.size) {
+                if (persistedCount != profilesToPersist.size) {
                     Log.w(
                         TAG,
                         "persist mismatch id=$subscriptionId connectable=${connectableProfiles.size} persisted=$persistedCount"
@@ -712,15 +878,11 @@ class RoomSubscriptionRepository(
                 }
             } else {
                 var clearedStaleMarkers = false
+                var shouldClearStaleMarkers = false
                 if (parsedData.markerEntriesCount > 0) {
                     val existingProfiles = profileDao.findBySubscriptionId(subscriptionId).map { it.toDomain() }
-                    if (existingProfiles.isNotEmpty() && existingProfiles.all { isServiceMarkerProfile(it) }) {
-                        database.withTransaction {
-                            profileDao.deleteBySubscriptionId(subscriptionId)
-                        }
-                        persistedCount = 0
-                        clearedStaleMarkers = true
-                        Log.i(TAG, "persist cleanup id=$subscriptionId removed stale marker-only profiles")
+                    if (existingProfiles.isNotEmpty() && existingProfiles.all { !technicalEntryMatcher(it.sourceRaw, it.normalizedJson) && isServiceMarkerProfile(it) }) {
+                        shouldClearStaleMarkers = true
                     }
                 }
 
@@ -730,30 +892,111 @@ class RoomSubscriptionRepository(
                     syncMessage = "Не удалось распарсить подписку: 0/${parsedData.parseResult.discoveredEntriesCount}"
                 }
                 val failureReason = parsedData.parseResult.warnings.firstOrNull() ?: syncMessage
+                database.withTransaction {
+                    validateSelectedPolicyFresh()
+                    if (shouldClearStaleMarkers) {
+                        profileDao.deleteBySubscriptionId(subscriptionId)
+                        persistedCount = 0
+                        clearedStaleMarkers = true
+                    }
+                    subscriptionSourceDao.upsert(
+                        source.copy(
+                            profileCount = if (clearedStaleMarkers) 0 else source.profileCount,
+                            childProfileIds = if (clearedStaleMarkers) emptyList() else source.childProfileIds,
+                            lastSelectedProfileId = if (clearedStaleMarkers) null else source.lastSelectedProfileId,
+                            lastUpdatedAtMs = startedAt,
+                            lastSuccessAtMs = source.lastSuccessAtMs,
+                            lastError = failureReason,
+                            syncStatus = syncStatus,
+                            metadata = SubscriptionMetadataCodec.encode(
+                                displayTitle = resolvedTitle,
+                                providerName = providerName,
+                                providerSite = providerSite,
+                                clientMode = persistedClientMode.wireValue,
+                                platformHints = platformHints.toList(),
+                                diagnostics = parseDiagnostics.copy(
+                                    insertedProfiles = insertedProfilesCount,
+                                    updatedProfiles = updatedProfilesCount,
+                                    filteredOutProfiles = filteredOutCount,
+                                    duplicateCount = duplicateCount,
+                                    savedProfiles = if (clearedStaleMarkers) 0 else source.profileCount,
+                                    shortError = failureReason
+                                ),
+                                providerDomain = providerDomain,
+                                providerSiteUrl = providerSite,
+                                supportUrl = supportUrl,
+                                profileWebPageUrl = profileWebPageUrl,
+                                announcementText = announcementText,
+                                planId = planId,
+                                userId = userId,
+                                note = note,
+                                badgeText = badgeText,
+                                trafficUploadBytes = trafficUploadBytes,
+                                trafficDownloadBytes = trafficDownloadBytes,
+                                trafficTotalBytes = trafficTotalBytes,
+                                trafficRemainingBytes = trafficRemainingBytes,
+                                expireAt = expireAt,
+                                expireText = expireText,
+                                serverCount = if (clearedStaleMarkers) 0 else source.profileCount,
+                                logoUrl = logoUrl,
+                                logoHint = logoHint,
+                                tags = tags.toList(),
+                                labelLine = labelLine,
+                                providerMessage = providerMessage,
+                                clientPolicy = clientPolicy
+                            ),
+                            updatedAtMs = startedAt
+                        ).toEntity()
+                    )
+                    validateSelectedPolicyFresh()
+                }
+                Log.i(
+                    TAG,
+                    "persist skipped id=$subscriptionId parsedProfilesCount=${parsedData.parseResult.validProfiles.size} " +
+                        "insertedProfilesCount=$insertedProfilesCount updatedProfilesCount=$updatedProfilesCount " +
+                        "filteredOutCount=$filteredOutCount duplicateCount=$duplicateCount persistedCount=$persistedCount " +
+                        "clearedStaleMarkers=$clearedStaleMarkers"
+                )
+            }
+
+            SubscriptionRefreshResult(
+                subscriptionId = subscriptionId,
+                status = syncStatus,
+                importedProfilesCount = persistedCount,
+                invalidEntriesCount = parsedData.parseResult.invalidEntriesCount,
+                message = syncMessage,
+                acceptance = contentAcceptance
+            )
+        }.getOrElse { error ->
+            if (error is CancellationException) {
+                if (!requireValidatedImport) withContext(NonCancellable) {
+                    val latest = subscriptionSourceDao.findById(subscriptionId)?.toDomain()
+                    if (latest?.syncStatus == SubscriptionSyncStatus.LOADING && latest.lastUpdatedAtMs == startedAt) {
+                        subscriptionSourceDao.upsert(source.toEntity())
+                    }
+                }
+                throw error
+            }
+            val errorReason = safeRefreshError(error)
+            val failedDiagnostics = diagnostics.copy(shortError = errorReason)
+            val errorType = error::class.java.simpleName
+            Log.w(
+                TAG,
+                "refresh failed id=$subscriptionId type=$errorType reason=$errorReason"
+            )
+            if (!requireValidatedImport) {
                 subscriptionSourceDao.upsert(
                     source.copy(
-                        profileCount = if (clearedStaleMarkers) 0 else source.profileCount,
-                        childProfileIds = if (clearedStaleMarkers) emptyList() else source.childProfileIds,
-                        lastSelectedProfileId = if (clearedStaleMarkers) null else source.lastSelectedProfileId,
                         lastUpdatedAtMs = startedAt,
-                        lastError = failureReason,
-                        etag = response.etag ?: source.etag,
-                        lastModified = response.lastModified ?: source.lastModified,
-                        syncStatus = syncStatus,
+                        lastError = errorReason,
+                        syncStatus = SubscriptionSyncStatus.ERROR,
                         metadata = SubscriptionMetadataCodec.encode(
                             displayTitle = resolvedTitle,
                             providerName = providerName,
                             providerSite = providerSite,
                             clientMode = persistedClientMode.wireValue,
                             platformHints = platformHints.toList(),
-                            diagnostics = parseDiagnostics.copy(
-                                insertedProfiles = insertedProfilesCount,
-                                updatedProfiles = updatedProfilesCount,
-                                filteredOutProfiles = filteredOutCount,
-                                duplicateCount = duplicateCount,
-                                savedProfiles = if (clearedStaleMarkers) 0 else source.profileCount,
-                                shortError = failureReason
-                            ),
+                            diagnostics = failedDiagnostics,
                             providerDomain = providerDomain,
                             providerSiteUrl = providerSite,
                             supportUrl = supportUrl,
@@ -769,78 +1012,18 @@ class RoomSubscriptionRepository(
                             trafficRemainingBytes = trafficRemainingBytes,
                             expireAt = expireAt,
                             expireText = expireText,
-                            serverCount = if (clearedStaleMarkers) 0 else source.profileCount,
+                            serverCount = source.profileCount,
                             logoUrl = logoUrl,
                             logoHint = logoHint,
                             tags = tags.toList(),
                             labelLine = labelLine,
-                            providerMessage = providerMessage
+                            providerMessage = providerMessage,
+                            clientPolicy = meta.clientPolicy
                         ),
                         updatedAtMs = startedAt
                     ).toEntity()
                 )
-                Log.i(
-                    TAG,
-                    "persist skipped id=$subscriptionId parsedProfilesCount=${parsedData.parseResult.validProfiles.size} " +
-                        "insertedProfilesCount=$insertedProfilesCount updatedProfilesCount=$updatedProfilesCount " +
-                        "filteredOutCount=$filteredOutCount duplicateCount=$duplicateCount persistedCount=$persistedCount " +
-                        "clearedStaleMarkers=$clearedStaleMarkers"
-                )
             }
-
-            SubscriptionRefreshResult(
-                subscriptionId = subscriptionId,
-                status = syncStatus,
-                importedProfilesCount = persistedCount,
-                invalidEntriesCount = parsedData.parseResult.invalidEntriesCount,
-                message = syncMessage
-            )
-        }.getOrElse { error ->
-            val errorReason = (error.message ?: "Ошибка обновления подписки").trim().take(240)
-            val failedDiagnostics = diagnostics.copy(shortError = errorReason)
-            val errorType = error::class.java.simpleName
-            Log.w(
-                TAG,
-                "refresh failed id=$subscriptionId type=$errorType reason=$errorReason",
-                error
-            )
-            subscriptionSourceDao.upsert(
-                source.copy(
-                    lastUpdatedAtMs = startedAt,
-                    lastError = errorReason,
-                    syncStatus = SubscriptionSyncStatus.ERROR,
-                    metadata = SubscriptionMetadataCodec.encode(
-                        displayTitle = resolvedTitle,
-                        providerName = providerName,
-                        providerSite = providerSite,
-                        clientMode = persistedClientMode.wireValue,
-                        platformHints = platformHints.toList(),
-                        diagnostics = failedDiagnostics,
-                        providerDomain = providerDomain,
-                        providerSiteUrl = providerSite,
-                        supportUrl = supportUrl,
-                        profileWebPageUrl = profileWebPageUrl,
-                        announcementText = announcementText,
-                        planId = planId,
-                        userId = userId,
-                        note = note,
-                        badgeText = badgeText,
-                        trafficUploadBytes = trafficUploadBytes,
-                        trafficDownloadBytes = trafficDownloadBytes,
-                        trafficTotalBytes = trafficTotalBytes,
-                        trafficRemainingBytes = trafficRemainingBytes,
-                        expireAt = expireAt,
-                        expireText = expireText,
-                        serverCount = source.profileCount,
-                        logoUrl = logoUrl,
-                        logoHint = logoHint,
-                        tags = tags.toList(),
-                        labelLine = labelLine,
-                        providerMessage = providerMessage
-                    ),
-                    updatedAtMs = startedAt
-                ).toEntity()
-            )
             SubscriptionRefreshResult(
                 subscriptionId = subscriptionId,
                 status = SubscriptionSyncStatus.ERROR,
@@ -852,7 +1035,7 @@ class RoomSubscriptionRepository(
     }
 
     override suspend fun refreshAllSubscriptions(force: Boolean): List<SubscriptionRefreshResult> {
-        val now = System.currentTimeMillis()
+        val now = clock()
         val all = subscriptionSourceDao.findEnabled().map { it.toDomain() }
         val targets = if (force) {
             all
@@ -860,7 +1043,7 @@ class RoomSubscriptionRepository(
             all.filter { it.autoUpdateEnabled && isDueForAutoUpdate(it, now) }
         }
         return targets.map { source ->
-            refreshSubscription(subscriptionId = source.id, force = true)
+            refreshSubscription(subscriptionId = source.id, force = force)
         }
     }
 
@@ -913,7 +1096,8 @@ class RoomSubscriptionRepository(
         subscription: SubscriptionSource,
         body: String,
         headers: Map<String, String>,
-        importedAt: Long
+        importedAt: Long,
+        existingProfiles: List<VpnProfile>
     ): ParsedSubscriptionData {
         val bodyWithRoutingHeader = headerValue(headers, HAPP_ROUTING_HEADER)
             ?.takeIf { it.startsWith("happ://routing/", ignoreCase = true) }
@@ -932,18 +1116,27 @@ class RoomSubscriptionRepository(
                 }
             }
             ?: builtProfiles.profiles
-        val (markerProfiles, connectableProfiles) = allProfiles.partition { isServiceMarkerProfile(it) }
+        val identifiedProfiles = SubscriptionProfileIdentity.reuse(existingProfiles, allProfiles).map { profile ->
+            profile.copy(isTechnicalEntry = technicalEntryMatcher(profile.sourceRaw, profile.normalizedJson))
+        }
+        val markerProfiles = identifiedProfiles.filter { !it.isTechnicalEntry && isServiceMarkerProfile(it) }
+        val visibleProfiles = identifiedProfiles.filter { it.isTechnicalEntry || !isServiceMarkerProfile(it) }
+        val connectableProfiles = visibleProfiles.filter { it.isConnectable }
+        val technicalProfiles = visibleProfiles.filter { it.isTechnicalEntry }
         val markerMetadata = extractMarkerMetadata(markerProfiles)
 
         return ParsedSubscriptionData(
             parseResult = parseResult,
-            allProfiles = allProfiles,
+            allProfiles = identifiedProfiles,
             connectableProfiles = connectableProfiles,
+            visibleProfiles = visibleProfiles,
+            technicalProfiles = technicalProfiles,
             markerEntriesCount = markerProfiles.size,
             duplicateCount = builtProfiles.duplicateCount,
             compatibilityMode = markerMetadata.compatibilityMode,
             providerSite = markerMetadata.providerSite,
-            platformHints = markerMetadata.platformHints
+            platformHints = markerMetadata.platformHints,
+            providerMessage = markerMetadata.providerMessage
         )
     }
 
@@ -969,78 +1162,6 @@ class RoomSubscriptionRepository(
             isPartialImport = routed.isPartialImport,
             importWarnings = routed.importWarnings
         )
-    }
-
-    private fun logShortIdTraceStage1And2(
-        subscriptionId: String,
-        drafts: List<ImportedProfileDraft>
-    ) {
-        if (drafts.isEmpty()) {
-            Log.i(TAG, "SHORTID TRACE stage1/2 id=$subscriptionId no-valid-drafts")
-            return
-        }
-
-        drafts.take(SHORTID_TRACE_PROFILE_LIMIT).forEachIndexed { index, draft ->
-            val stage1 = extractProxyShortIdState(draft.sourceRaw)
-            val stage2Payload = draft.normalizedJson ?: draft.sourceRaw
-            val stage2 = extractProxyShortIdState(stage2Payload)
-
-            Log.i(
-                TAG,
-                "SHORTID TRACE stage=1 id=$subscriptionId idx=$index profile='${draft.displayName}' " +
-                    "type=${draft.type.name} shortId=${stage1.shortIdForLog()} " +
-                    "reality=${stage1.realityEnabled} payload=${stage1.payloadKind} " +
-                    "proxyTag=${stage1.proxyTagFound} outbounds=${stage1.outboundCount}"
-            )
-            Log.i(
-                TAG,
-                "SHORTID TRACE stage=2 id=$subscriptionId idx=$index profile='${draft.displayName}' " +
-                    "type=${draft.type.name} partial=${draft.isPartialImport} shortId=${stage2.shortIdForLog()} " +
-                    "reality=${stage2.realityEnabled} payload=${stage2.payloadKind} " +
-                    "proxyTag=${stage2.proxyTagFound} outbounds=${stage2.outboundCount}"
-            )
-
-            if (shouldDumpTracePayload(draft.displayName, index)) {
-                logTracePayloadChunks(
-                    prefix = "SHORTID TRACE stage=1 payload id=$subscriptionId idx=$index",
-                    payload = draft.sourceRaw
-                )
-                if (!draft.normalizedJson.isNullOrBlank()) {
-                    logTracePayloadChunks(
-                        prefix = "SHORTID TRACE stage=2 payload id=$subscriptionId idx=$index",
-                        payload = draft.normalizedJson
-                    )
-                }
-            }
-        }
-    }
-
-    private fun logShortIdTraceStage3(
-        subscriptionId: String,
-        profiles: List<VpnProfile>
-    ) {
-        if (profiles.isEmpty()) {
-            Log.i(TAG, "SHORTID TRACE stage=3 id=$subscriptionId persisted-profiles-empty")
-            return
-        }
-
-        profiles.take(SHORTID_TRACE_PROFILE_LIMIT).forEachIndexed { index, profile ->
-            val persistedPayload = profile.normalizedJson ?: profile.sourceRaw
-            val stage3 = extractProxyShortIdState(persistedPayload)
-            Log.i(
-                TAG,
-                "SHORTID TRACE stage=3 id=$subscriptionId idx=$index profileId=${profile.id} " +
-                    "profile='${profile.displayName}' type=${profile.type.name} shortId=${stage3.shortIdForLog()} " +
-                    "reality=${stage3.realityEnabled} payload=${stage3.payloadKind} " +
-                    "proxyTag=${stage3.proxyTagFound} outbounds=${stage3.outboundCount}"
-            )
-            if (shouldDumpTracePayload(profile.displayName, index)) {
-                logTracePayloadChunks(
-                    prefix = "SHORTID TRACE stage=3 payload id=$subscriptionId idx=$index profileId=${profile.id}",
-                    payload = persistedPayload
-                )
-            }
-        }
     }
 
     private fun shouldProbeAlternativeClientMode(
@@ -1171,29 +1292,6 @@ class RoomSubscriptionRepository(
         return null
     }
 
-    private fun shouldDumpTracePayload(profileName: String, index: Int): Boolean {
-        if (index == 0) return true
-        val normalizedName = profileName.trim().lowercase(Locale.US)
-        return normalizedName.contains("свободный интернет #1") || normalizedName.contains("svobod")
-    }
-
-    private fun logTracePayloadChunks(prefix: String, payload: String) {
-        if (payload.isBlank()) {
-            Log.i(TAG, "$prefix <empty>")
-            return
-        }
-        Log.i(TAG, "$prefix len=${payload.length}")
-        var cursor = 0
-        var chunkIndex = 0
-        while (cursor < payload.length) {
-            val end = (cursor + SHORTID_TRACE_PAYLOAD_CHUNK).coerceAtMost(payload.length)
-            val chunk = payload.substring(cursor, end)
-            Log.i(TAG, "$prefix chunk=$chunkIndex $chunk")
-            cursor = end
-            chunkIndex += 1
-        }
-    }
-
     private fun buildParsedDataQuality(data: ParsedSubscriptionData): ParsedDataQuality {
         val connectable = data.connectableProfiles
         val nonPartialCount = connectable.count { !it.isPartialImport }
@@ -1217,7 +1315,8 @@ class RoomSubscriptionRepository(
             rawJsonCount = rawJsonCount,
             realityPresentShortIdCount = realityPresentShortIdCount,
             realityMissingShortIdCount = realityMissingShortIdCount,
-            markerCount = data.markerEntriesCount
+            markerCount = data.markerEntriesCount,
+            technicalCount = data.technicalProfiles.size
         )
     }
 
@@ -1244,6 +1343,9 @@ class RoomSubscriptionRepository(
             candidateQuality.realityPresentShortIdCount != bestQuality.realityPresentShortIdCount ->
                 candidateQuality.realityPresentShortIdCount > bestQuality.realityPresentShortIdCount
 
+            candidateQuality.technicalCount != bestQuality.technicalCount ->
+                candidateQuality.technicalCount > bestQuality.technicalCount
+
             candidateQuality.markerCount != bestQuality.markerCount ->
                 candidateQuality.markerCount < bestQuality.markerCount
 
@@ -1251,50 +1353,14 @@ class RoomSubscriptionRepository(
         }
     }
 
-    private fun isServiceMarkerProfile(profile: VpnProfile): Boolean {
-        val raw = profile.sourceRaw.trim()
-        val loweredName = profile.displayName.lowercase(Locale.US)
-        if (raw.startsWith("vless://", ignoreCase = true) ||
-            raw.startsWith("vmess://", ignoreCase = true) ||
-            raw.startsWith("trojan://", ignoreCase = true)
-        ) {
-            val uri = runCatching { Uri.parse(raw) }.getOrNull()
-            val host = uri?.host?.trim()?.lowercase(Locale.US).orEmpty()
-            val port = uri?.port ?: -1
-            val userInfo = uri?.userInfo?.trim()?.lowercase(Locale.US).orEmpty()
-            val decodedFragment = Uri.decode(uri?.fragment.orEmpty()).lowercase(Locale.US)
-            val markerEndpoint = host in MARKER_HOSTS && port in MARKER_PORTS
+    private fun isPolicyBodyValidated(data: ParsedSubscriptionData): Boolean = isDisplayBodyValidated(data)
 
-            if (markerEndpoint) return true
-            if (userInfo == ZERO_UUID && host in MARKER_HOSTS) return true
-            if (markerEndpoint && SERVICE_MARKER_KEYWORDS.any { decodedFragment.contains(it) }) return true
-            if (markerEndpoint && SERVICE_MARKER_KEYWORDS.any { loweredName.contains(it) }) return true
-        }
+    private fun isDisplayBodyValidated(data: ParsedSubscriptionData): Boolean =
+        data.parseResult.invalidEntriesCount == 0 && data.visibleProfiles.isNotEmpty() &&
+            (data.connectableProfiles.isEmpty() || SubscriptionBodyValidator.isComplete(data.connectableProfiles))
 
-        if (raw.startsWith("{")) {
-            val markerByJson = runCatching {
-                val json = org.json.JSONObject(raw)
-                val remarks = json.optString("remarks").lowercase(Locale.US)
-                val outbounds = json.optJSONArray("outbounds")
-                var address = ""
-                var port = -1
-                if (outbounds != null && outbounds.length() > 0) {
-                    val outbound = outbounds.optJSONObject(0)
-                    val settings = outbound?.optJSONObject("settings")
-                    val vnext = settings?.optJSONArray("vnext")
-                    val server = vnext?.optJSONObject(0)
-                    address = server?.optString("address").orEmpty().lowercase(Locale.US)
-                    port = server?.optInt("port") ?: -1
-                }
-                (address in MARKER_HOSTS && port in MARKER_PORTS) ||
-                    SERVICE_MARKER_KEYWORDS.any { remarks.contains(it) }
-            }.getOrDefault(false)
-
-            if (markerByJson) return true
-        }
-
-        return false
-    }
+    private fun isServiceMarkerProfile(profile: VpnProfile): Boolean =
+        SubscriptionServiceRecords.isServiceRecord(profile.sourceRaw, profile.normalizedJson)
 
     private fun extractMarkerMetadata(markerProfiles: List<VpnProfile>): MarkerMetadata {
         if (markerProfiles.isEmpty()) return MarkerMetadata()
@@ -1302,13 +1368,12 @@ class RoomSubscriptionRepository(
         val hints = linkedSetOf<String>()
         var providerSite: String? = null
         var compatibilityMode: String? = null
+        val messages = linkedSetOf<String>()
 
         markerProfiles.forEach { profile ->
-            val decodedName = runCatching {
-                val uri = Uri.parse(profile.sourceRaw)
-                Uri.decode(uri.fragment ?: profile.displayName)
-            }.getOrDefault(profile.displayName)
+            val decodedName = profile.displayName
             val lowered = decodedName.lowercase(Locale.US)
+            decodedName.trim().takeIf { it.isNotBlank() }?.let { messages += it.take(1024) }
 
             if (lowered.contains("android")) hints += "Android"
             if (lowered.contains("apple") || lowered.contains("ios")) hints += "Apple"
@@ -1333,7 +1398,8 @@ class RoomSubscriptionRepository(
         return MarkerMetadata(
             compatibilityMode = compatibilityMode,
             providerSite = providerSite,
-            platformHints = hints.toList()
+            platformHints = hints.toList(),
+            providerMessage = messages.joinToString("\n").take(2048).takeIf { it.isNotBlank() }
         )
     }
 
@@ -1629,16 +1695,20 @@ class RoomSubscriptionRepository(
     ): Boolean {
         if (appContext == null) return false
         if (parsedData.connectableProfiles.isNotEmpty()) return false
+        if (parsedData.technicalProfiles.isNotEmpty() && parsedData.markerEntriesCount == 0) return false
 
-        val hwidActive = headerValue(response.headers, HWID_ACTIVE_HEADER)?.equals("true", ignoreCase = true) == true
         val hwidNotSupported = headerValue(response.headers, HWID_NOT_SUPPORTED_HEADER)
             ?.equals("true", ignoreCase = true) == true
-        val markerOnly = parsedData.markerEntriesCount > 0
-
-        return hwidNotSupported || (hwidActive && markerOnly)
+        return SubscriptionCompatibilityPolicy.shouldProbe(
+            connectableCount = parsedData.connectableProfiles.size,
+            markerCount = parsedData.markerEntriesCount,
+            hwidNotSupported = hwidNotSupported,
+            unusableResponse = parsedData.parseResult.validProfiles.isEmpty()
+        )
     }
 
     private fun resolveCompatibilityHwid(): String? {
+        compatibilityHwidProvider?.let { return it() }
         val context = appContext ?: return null
         val prefs = context.getSharedPreferences(COMPAT_PREFS_NAME, Context.MODE_PRIVATE)
         prefs.getString(COMPAT_HWID_KEY, null)?.takeIf { it.isNotBlank() }?.let { return it }
@@ -1701,6 +1771,14 @@ class RoomSubscriptionRepository(
             discoveredEntries == 0 -> SubscriptionSyncStatus.EMPTY
             else -> SubscriptionSyncStatus.ERROR
         }
+    }
+
+    private fun safeRefreshError(error: Throwable): String = when (error) {
+        is java.net.SocketTimeoutException -> "Сервер подписки не ответил вовремя"
+        is java.net.UnknownHostException -> "Не удалось найти сервер подписки"
+        is java.io.IOException -> "Не удалось загрузить подписку"
+        else -> Regex("HTTP [0-9]{3}").find(error.message.orEmpty())?.value
+            ?.let { "$it при обновлении подписки" } ?: "Не удалось обновить подписку"
     }
 
     private fun buildErrorMessage(diagnostics: SubscriptionSyncDiagnostics, errorReason: String): String {
@@ -1884,125 +1962,88 @@ class RoomSubscriptionRepository(
         etag: String?,
         lastModified: String?,
         useConditionalCache: Boolean
-    ): SubscriptionHttpResponse {
-        return withContext(Dispatchers.IO) {
-            val deviceOs = resolveDeviceOsHeader()
-            val deviceModel = resolveDeviceModelHeader()
-            val connection = (URL(attempt.endpointUrl).openConnection() as HttpURLConnection).apply {
+    ): SubscriptionHttpResponse = withContext(Dispatchers.IO) {
+        var requestUrl = URL(attempt.endpointUrl)
+        val initialUrl = requestUrl
+        val deadline = System.nanoTime() + 35_000_000_000L
+        var redirects = 0
+        var trustedOriginChain = true
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            val remainingMs = ((deadline - System.nanoTime()) / 1_000_000).toInt()
+            require(remainingMs > 0) { "Subscription request deadline exceeded" }
+            val sameOrigin = trustedOriginChain && sameOrigin(initialUrl, requestUrl)
+            val connection = httpConnectionFactory(requestUrl).apply {
                 requestMethod = "GET"
-                connectTimeout = HTTP_TIMEOUT_MS
-                readTimeout = HTTP_TIMEOUT_MS
-                instanceFollowRedirects = true
+                connectTimeout = minOf(HTTP_TIMEOUT_MS, remainingMs)
+                readTimeout = minOf(HTTP_TIMEOUT_MS, remainingMs)
+                instanceFollowRedirects = false
                 setRequestProperty("Accept", "*/*")
                 setRequestProperty("User-Agent", attempt.userAgent)
-                setRequestProperty(DEVICE_OS_HEADER, deviceOs)
-                setRequestProperty(X_DEVICE_OS_HEADER, deviceOs)
-                setRequestProperty(DEVICE_MODEL_HEADER, deviceModel)
-                setRequestProperty(X_DEVICE_MODEL_HEADER, deviceModel)
-
-                if (attempt.useHwidHeaders && !attempt.hwid.isNullOrBlank()) {
-                    setRequestProperty(HWID_HEADER, attempt.hwid)
-                    setRequestProperty("X-Hwid", attempt.hwid)
-                }
-
-                if (useConditionalCache && !etag.isNullOrBlank()) {
-                    setRequestProperty("If-None-Match", etag)
-                }
-                if (useConditionalCache && !lastModified.isNullOrBlank()) {
-                    setRequestProperty("If-Modified-Since", lastModified)
+                if (sameOrigin) {
+                    setRequestProperty(DEVICE_OS_HEADER, resolveDeviceOsHeader())
+                    setRequestProperty(X_DEVICE_OS_HEADER, resolveDeviceOsHeader())
+                    setRequestProperty(DEVICE_MODEL_HEADER, resolveDeviceModelHeader())
+                    setRequestProperty(X_DEVICE_MODEL_HEADER, resolveDeviceModelHeader())
+                    SubscriptionClientPolicyReader.requestHeaders.forEach { (name, value) -> setRequestProperty(name, value) }
+                    if (attempt.useHwidHeaders && !attempt.hwid.isNullOrBlank()) setRequestProperty(HWID_HEADER, attempt.hwid)
+                    if (useConditionalCache && !etag.isNullOrBlank()) setRequestProperty("If-None-Match", etag)
+                    if (useConditionalCache && !lastModified.isNullOrBlank()) setRequestProperty("If-Modified-Since", lastModified)
                 }
             }
-
-            val hwidLog = if (attempt.useHwidHeaders && !attempt.hwid.isNullOrBlank()) {
-                attempt.hwid.take(8) + "***"
-            } else {
-                "<none>"
-            }
-            Log.i(
-                TAG,
-                "request headers endpoint=${attempt.endpointVariant} mode=${attempt.clientMode.wireValue} " +
-                    "hwid=${if (attempt.useHwidHeaders) "on" else "off"} x-hwid=$hwidLog " +
-                    "device-os='$deviceOs' device-model='$deviceModel'"
-            )
-
             try {
                 val statusCode = connection.responseCode
-                val headers = extractHeaders(connection)
-                val headersSummary = summarizeHeaders(headers)
-                when (statusCode) {
-                    HttpURLConnection.HTTP_NOT_MODIFIED -> SubscriptionHttpResponse(
-                        statusCode = statusCode,
-                        body = null,
-                        bodyLength = 0,
-                        contentType = connection.contentType,
-                        headers = headers,
-                        headersSummary = headersSummary,
-                        bodyPreview = null,
-                        etag = connection.getHeaderField("ETag"),
-                        lastModified = connection.getHeaderField("Last-Modified"),
-                        notModified = true
-                    )
-
-                    in 200..299 -> {
-                        val responseBytes = connection.inputStream.use {
-                            readResponseBytes(it, connection.getHeaderField("Content-Encoding"))
-                        }
-                        val body = decodeBody(responseBytes, connection.contentType)
-                        SubscriptionHttpResponse(
-                            statusCode = statusCode,
-                            body = body,
-                            bodyLength = responseBytes.size,
-                            contentType = connection.contentType,
-                            headers = headers,
-                            headersSummary = headersSummary,
-                            bodyPreview = buildSafePreview(body),
-                            etag = connection.getHeaderField("ETag"),
-                            lastModified = connection.getHeaderField("Last-Modified"),
-                            notModified = false
-                        )
-                    }
-
-                    else -> {
-                        val errorBytes = runCatching {
-                            connection.errorStream?.use {
-                                readResponseBytes(
-                                    it,
-                                    connection.getHeaderField("Content-Encoding")
-                                )
-                            }
-                        }.getOrNull()
-                        val errorText = errorBytes?.let { decodeBody(it, connection.contentType) }.orEmpty()
-                        val hwidNotSupported = headerValue(headers, HWID_NOT_SUPPORTED_HEADER)
-                            ?.equals("true", ignoreCase = true) == true
-                        val hwidActive = headerValue(headers, HWID_ACTIVE_HEADER)
-                            ?.equals("true", ignoreCase = true) == true
-                        val hwidLimit = headerValue(headers, HWID_LIMIT_HEADER)
-                            ?.equals("true", ignoreCase = true) == true
-                        val isCompatibilityGate = hwidNotSupported || (hwidActive && hwidLimit)
-                        if (isCompatibilityGate) {
-                            return@withContext SubscriptionHttpResponse(
-                                statusCode = statusCode,
-                                body = errorText,
-                                bodyLength = errorBytes?.size ?: 0,
-                                contentType = connection.contentType,
-                                headers = headers,
-                                headersSummary = headersSummary,
-                                bodyPreview = buildSafePreview(errorText),
-                                etag = connection.getHeaderField("ETag"),
-                                lastModified = connection.getHeaderField("Last-Modified"),
-                                notModified = false
-                            )
-                        }
-                        throw IllegalStateException(
-                            "HTTP $statusCode при обновлении подписки. ${errorText.take(200)}"
-                        )
-                    }
+                currentCoroutineContext().ensureActive()
+                if (statusCode in setOf(301, 302, 303, 307, 308)) {
+                    require(redirects++ < 5) { "Too many subscription redirects" }
+                    val location = connection.getHeaderField("Location") ?: error("Subscription redirect missing location")
+                    val next = URL(requestUrl, location)
+                    SubscriptionUrlValidator.validate(next.toString())
+                    require(!(requestUrl.protocol.equals("https", true) && next.protocol.equals("http", true))) { "Subscription HTTPS downgrade is forbidden" }
+                    if (!sameOrigin(initialUrl, next)) trustedOriginChain = false
+                    requestUrl = next
+                    continue
                 }
+                val headers = extractHeaders(connection)
+                val metadataValues = connection.headerFields.entries.filter {
+                    it.key?.equals(SubscriptionClientPolicyReader.HEADER, true) == true
+                }.flatMap { it.value.orEmpty() }.map { it.orEmpty() }
+                fun response(body: String?, size: Int, notModified: Boolean = false) = SubscriptionHttpResponse(
+                    statusCode, body, size, connection.contentType, headers, summarizeHeaders(headers),
+                    null, connection.getHeaderField("ETag"), connection.getHeaderField("Last-Modified"), notModified,
+                    requestUrl.toString(), if (sameOrigin) metadataValues else emptyList()
+                )
+                if (statusCode == HttpURLConnection.HTTP_NOT_MODIFIED) return@withContext response(null, 0, true)
+                if (statusCode in 200..299) {
+                    val bytes = connection.inputStream.use {
+                        readResponseBytes(it, connection.getHeaderField("Content-Encoding"), deadline)
+                    }
+                    currentCoroutineContext().ensureActive()
+                    val expectedLength = connection.getHeaderField("Content-Length")?.toLongOrNull()
+                    if (connection.getHeaderField("Content-Encoding").isNullOrBlank() && expectedLength != null) {
+                        require(expectedLength == bytes.size.toLong()) { "Truncated subscription response" }
+                    }
+                    return@withContext response(decodeBody(bytes, connection.contentType), bytes.size)
+                }
+                val bytes = connection.errorStream?.use {
+                    readResponseBytes(it, connection.getHeaderField("Content-Encoding"), deadline)
+                } ?: byteArrayOf()
+                val unsupported = headerValue(headers, HWID_NOT_SUPPORTED_HEADER).equals("true", true)
+                val limited = headerValue(headers, HWID_ACTIVE_HEADER).equals("true", true) &&
+                    headerValue(headers, HWID_LIMIT_HEADER).equals("true", true)
+                if (unsupported || limited) return@withContext response(decodeBody(bytes, connection.contentType), bytes.size)
+                error("HTTP $statusCode при обновлении подписки.")
             } finally {
                 connection.disconnect()
             }
         }
+        @Suppress("UNREACHABLE_CODE")
+        error("Unreachable subscription response")
     }
+
+    private fun sameOrigin(first: URL, second: URL): Boolean = first.protocol.equals(second.protocol, true) &&
+        first.host.equals(second.host, true) &&
+        (if (first.port == -1) first.defaultPort else first.port) == (if (second.port == -1) second.defaultPort else second.port)
 
     private fun extractHeaders(connection: HttpURLConnection): Map<String, String> {
         val result = linkedMapOf<String, String>()
@@ -2044,13 +2085,19 @@ class RoomSubscriptionRepository(
         }.joinToString(separator = "; ").take(420)
     }
 
-    private fun readResponseBytes(stream: InputStream, contentEncoding: String?): ByteArray {
-        val encoding = contentEncoding?.lowercase(Locale.US).orEmpty()
-        return if (encoding.contains("gzip")) {
-            GZIPInputStream(stream).use { it.readBytes() }
-        } else {
-            stream.readBytes()
+    private suspend fun readResponseBytes(stream: InputStream, contentEncoding: String?, deadline: Long): ByteArray {
+        val input = if (contentEncoding?.contains("gzip", true) == true) GZIPInputStream(stream) else stream
+        val output = java.io.ByteArrayOutputStream()
+        val buffer = ByteArray(8192)
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            require(System.nanoTime() < deadline) { "Subscription response deadline exceeded" }
+            val count = input.read(buffer)
+            if (count < 0) break
+            require(output.size() + count <= 16 * 1024 * 1024) { "Subscription response is too large" }
+            output.write(buffer, 0, count)
         }
+        return output.toByteArray()
     }
 
     private fun decodeBody(bytes: ByteArray, contentType: String?): String {
@@ -2090,11 +2137,14 @@ class RoomSubscriptionRepository(
         val parseResult: SubscriptionParseResult,
         val allProfiles: List<VpnProfile>,
         val connectableProfiles: List<VpnProfile>,
+        val visibleProfiles: List<VpnProfile>,
+        val technicalProfiles: List<VpnProfile>,
         val markerEntriesCount: Int,
         val duplicateCount: Int,
         val compatibilityMode: String?,
         val providerSite: String?,
-        val platformHints: List<String>
+        val platformHints: List<String>,
+        val providerMessage: String?
     )
 
     private data class ParsedDataQuality(
@@ -2103,7 +2153,8 @@ class RoomSubscriptionRepository(
         val rawJsonCount: Int,
         val realityPresentShortIdCount: Int,
         val realityMissingShortIdCount: Int,
-        val markerCount: Int
+        val markerCount: Int,
+        val technicalCount: Int
     ) {
         fun summary(): String {
             return "connectable=$connectableCount nonPartial=$nonPartialCount rawJson=$rawJsonCount " +
@@ -2135,7 +2186,8 @@ class RoomSubscriptionRepository(
     private data class MarkerMetadata(
         val compatibilityMode: String? = null,
         val providerSite: String? = null,
-        val platformHints: List<String> = emptyList()
+        val platformHints: List<String> = emptyList(),
+        val providerMessage: String? = null
     )
 
     private data class ParsedUserInfo(
@@ -2199,10 +2251,14 @@ class RoomSubscriptionRepository(
         val bodyPreview: String?,
         val etag: String?,
         val lastModified: String?,
-        val notModified: Boolean
+        val notModified: Boolean,
+        val finalUrl: String,
+        val metadataHeaderValues: List<String>
     )
 
     private companion object {
+        private val refreshLocks = ConcurrentHashMap<String, Mutex>()
+        private val importLocks = ConcurrentHashMap<String, Mutex>()
         private const val TAG = "SubscriptionRepo"
         private const val BOM = "\uFEFF"
         private const val DEFAULT_UPDATE_INTERVAL_MINUTES: Int = 60

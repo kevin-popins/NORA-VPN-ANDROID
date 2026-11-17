@@ -121,6 +121,22 @@ class NoraDeepLinkParserTest {
         NoraDeepLinkParser.parse("noravpn://import/profile?data=$payload")
     }
 
+    @Test(expected = IllegalArgumentException::class)
+    fun `url and data aliases cannot supply conflicting subscription payloads`() {
+        NoraDeepLinkParser.parse("noravpn://import/subscription?url=https%3A%2F%2Fexample.com%2Fone&data=https%3A%2F%2Fexample.com%2Ftwo")
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `duplicated subscription alias is rejected even when url is supplied`() {
+        NoraDeepLinkParser.parse("noravpn://import/subscription?url=https%3A%2F%2Fexample.com&data=one&data=two")
+    }
+
+    @Test
+    fun `manual BOM and wrapper use the same strict deep link parser`() {
+        val request = NoraDeepLinkParser.parse(" \uFEFF<noravpn://import/subscription?url=https%3A%2F%2Fexample.com%2Fsub> ") as NoraDeepLinkImport.Subscription
+        assertEquals("https://example.com/sub", request.url)
+    }
+
     private fun encodeQuery(value: String): String {
         return URLEncoder.encode(value, StandardCharsets.UTF_8)
             .replace("+", "%20")

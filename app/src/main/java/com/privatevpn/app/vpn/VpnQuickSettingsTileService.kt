@@ -1,5 +1,10 @@
 package com.privatevpn.app.vpn
 
+import com.privatevpn.app.profiles.repository.toDomain
+import com.privatevpn.app.profiles.model.SubscriptionMetadataCodec
+import com.privatevpn.app.profiles.model.SubscriptionPresentation
+import com.privatevpn.app.profiles.model.userFacingName
+
 import com.privatevpn.app.ui.location.noraProfileDisplayName
 
 import android.content.ComponentName
@@ -117,7 +122,8 @@ class VpnQuickSettingsTileService : TileService() {
             try {
                 val profiles = RoomProfilesRepository(database.profileDao()).profiles.first()
                 val settings = DataStoreUserSettingsRepository(applicationContext).settings.first()
-                val activeName = profiles.firstOrNull { it.id == settings.activeProfileId }?.displayName
+                val sources = database.subscriptionSourceDao().observeAll().first().map { it.toDomain() }
+                val activeName = profiles.firstOrNull { it.id == settings.activeProfileId && it.isConnectable }?.let { SubscriptionPresentation.apply(it, sources).userFacingName }
                 if (!activeName.isNullOrBlank()) {
                     VpnRuntimeStateStore.setLastSelectedProfileName(activeName)
                 }
@@ -181,6 +187,10 @@ private class VpnQuickToggleExecutor(
     }
 
     private suspend fun connect(): Result<Unit> {
+        val settings = userSettingsRepository.settings.first()
+        val profiles = profilesRepository.profiles.first()
+        val profile = resolveProfile(settings.activeProfileId, profiles)
+            ?: return Result.failure(IllegalStateException("Нет доступного профиля для подключения"))
         if (VpnService.prepare(context) != null) {
             val openIntent = Intent(context, MainActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -196,28 +206,19 @@ private class VpnQuickToggleExecutor(
             )
         }
 
-        val settings = userSettingsRepository.settings.first()
-        val profiles = profilesRepository.profiles.first()
-        val profile = resolveProfile(settings.activeProfileId, profiles)
-            ?: return Result.failure(
-                AppException(
-                    AppErrors.tileToggleFailed(
-                        technicalReason = "Нет импортированного профиля для подключения из quick tile"
-                    )
-                )
-            )
-
+        val sources = database.subscriptionSourceDao().observeAll().first().map { it.toDomain() }
+        val presented = SubscriptionPresentation.apply(profile, sources)
         val dnsServers = resolveDns(settings.dnsMode, settings.customDnsServers, profile)
         val adapter = resolveBackend(profile.type)
 
         return adapter.start(
-            profile = profile,
+            profile = presented.copy(displayName = presented.userFacingName),
             dnsServers = dnsServers,
             privateSessionEnabled = settings.privateSessionEnabled,
             privateSessionTrustedPackages = settings.privateSessionTrustedPackages,
             socksSettings = settings.socksSettings
         ).map {
-            VpnRuntimeStateStore.setLastSelectedProfileName(profile.displayName)
+            VpnRuntimeStateStore.setLastSelectedProfileName(presented.userFacingName)
             if (settings.activeProfileId == null) {
                 userSettingsRepository.setActiveProfile(profile.id)
             }
@@ -249,8 +250,10 @@ private class VpnQuickToggleExecutor(
     }
 
     private fun resolveProfile(activeProfileId: String?, profiles: List<VpnProfile>): VpnProfile? {
-        if (profiles.isEmpty()) return null
-        return profiles.firstOrNull { it.id == activeProfileId } ?: profiles.first()
+        val selected = profiles.firstOrNull { it.id == activeProfileId }
+        if (selected != null && !selected.isConnectable) return null
+        val eligible = profiles.filter { it.isConnectable }
+        return selected ?: eligible.firstOrNull()
     }
 
     private fun resolveDns(mode: DnsMode, customDns: List<String>, activeProfile: VpnProfile): List<String> {

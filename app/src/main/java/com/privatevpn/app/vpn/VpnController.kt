@@ -65,6 +65,7 @@ class VpnController(private val appContext: Context) {
                 putExtra(PrivateVpnService.EXTRA_RUNTIME_CONFIG, request.runtimeConfig)
                 putExtra(PrivateVpnService.EXTRA_PROFILE_ID, request.profileId)
                 putExtra(PrivateVpnService.EXTRA_PROFILE_NAME, request.profileName)
+                putExtra(PrivateVpnService.EXTRA_ENDPOINT_PROTECTION, request.endpointProtectionEnabled)
                 putExtra(PrivateVpnService.EXTRA_PRIVATE_SESSION_ENABLED, request.privateSessionEnabled)
                 putStringArrayListExtra(
                     PrivateVpnService.EXTRA_PRIVATE_SESSION_TRUSTED_PACKAGES,

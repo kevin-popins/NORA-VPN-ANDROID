@@ -1,0 +1,203 @@
+{
+  "contract": "display-only-v1-unreleased",
+  "supersedes": "previous status/availability/native204 fixtures",
+  "clock_unix_seconds": 1794916860,
+  "request_headers": {
+    "X-Nora-Client": "nora-windows",
+    "X-Nora-Metadata-Accept": "1",
+    "X-Nora-Capabilities": "display-v1"
+  },
+  "compatible_extra_capabilities": [
+    "display-v1,status-v1",
+    "future-v1,display-v1"
+  ],
+  "response_cases": [
+    {
+      "name": "protected-ordinary200",
+      "http_status": 200,
+      "metadata": {
+        "v": 1,
+        "mode": "full",
+        "revision": 2,
+        "issued_at": 1794916800,
+        "ttl_seconds": 300,
+        "display": {
+          "protected": true,
+          "public_label": "NORA — рабочая сеть"
+        }
+      },
+      "response_headers": {
+        "X-Nora-Metadata": "eyJ2IjoxLCJtb2RlIjoiZnVsbCIsInJldmlzaW9uIjoyLCJpc3N1ZWRfYXQiOjE3OTQ5MTY4MDAsInR0bF9zZWNvbmRzIjozMDAsImRpc3BsYXkiOnsicHJvdGVjdGVkIjp0cnVlLCJwdWJsaWNfbGFiZWwiOiJOT1JBIOKAlCDRgNCw0LHQvtGH0LDRjyDRgdC10YLRjCJ9fQ"
+      },
+      "body_validation": "supported_nonempty_transport",
+      "expected": "adopt_full_policy_atomically_with_body"
+    },
+    {
+      "name": "explicit-clear-valid-known-technical200",
+      "http_status": 200,
+      "metadata": {
+        "v": 1,
+        "mode": "full",
+        "revision": 3,
+        "issued_at": 1794916800,
+        "ttl_seconds": 300,
+        "display": {
+          "protected": false,
+          "public_label": null
+        }
+      },
+      "response_headers": {
+        "X-Nora-Metadata": "eyJ2IjoxLCJtb2RlIjoiZnVsbCIsInJldmlzaW9uIjozLCJpc3N1ZWRfYXQiOjE3OTQ5MTY4MDAsInR0bF9zZWNvbmRzIjozMDAsImRpc3BsYXkiOnsicHJvdGVjdGVkIjpmYWxzZSwicHVibGljX2xhYmVsIjpudWxsfX0"
+      },
+      "body_validation": "existing_narrowly_known_AKFA_technical_entry",
+      "expected": "adopt_explicit_clear_atomically_keep_exact_technical_display_row_not_connectable",
+      "technical_body_fixture_owner": "platform existing canonical AKFA fixture; do not infer marker merely from remarks/blackhole"
+    },
+    {
+      "name": "clear-bad-or-truncated200",
+      "http_status": 200,
+      "metadata": {
+        "v": 1,
+        "mode": "full",
+        "revision": 3,
+        "issued_at": 1794916800,
+        "ttl_seconds": 300,
+        "display": {
+          "protected": false,
+          "public_label": null
+        }
+      },
+      "response_headers": {
+        "X-Nora-Metadata": "eyJ2IjoxLCJtb2RlIjoiZnVsbCIsInJldmlzaW9uIjozLCJpc3N1ZWRfYXQiOjE3OTQ5MTY4MDAsInR0bF9zZWNvbmRzIjozMDAsImRpc3BsYXkiOnsicHJvdGVjdGVkIjpmYWxzZSwicHVibGljX2xhYmVsIjpudWxsfX0"
+      },
+      "body_validation": "malformed",
+      "expected": "retain_protection_profiles_UUID_rawcache_selection_watermarks"
+    },
+    {
+      "name": "clear-unknown-provider-marker200",
+      "http_status": 200,
+      "metadata": {
+        "v": 1,
+        "mode": "full",
+        "revision": 3,
+        "issued_at": 1794916800,
+        "ttl_seconds": 300,
+        "display": {
+          "protected": false,
+          "public_label": null
+        }
+      },
+      "response_headers": {
+        "X-Nora-Metadata": "eyJ2IjoxLCJtb2RlIjoiZnVsbCIsInJldmlzaW9uIjozLCJpc3N1ZWRfYXQiOjE3OTQ5MTY4MDAsInR0bF9zZWNvbmRzIjozMDAsImRpc3BsYXkiOnsicHJvdGVjdGVkIjpmYWxzZSwicHVibGljX2xhYmVsIjpudWxsfX0"
+      },
+      "body_validation": "generic_or_unknown_placeholder",
+      "expected": "continue_existing_VZG_compatible_fallback_no_success_no_clear"
+    },
+    {
+      "name": "absent-header-valid-legacy200",
+      "http_status": 200,
+      "response_headers": {},
+      "body_validation": "supported_legacy",
+      "expected": "legacy_import_keep_accepted_policy"
+    },
+    {
+      "name": "non-authoritative204",
+      "http_status": 204,
+      "metadata": {
+        "v": 1,
+        "mode": "full",
+        "revision": 3,
+        "issued_at": 1794916800,
+        "ttl_seconds": 300,
+        "display": {
+          "protected": false,
+          "public_label": null
+        }
+      },
+      "response_headers": {
+        "X-Nora-Metadata": "eyJ2IjoxLCJtb2RlIjoiZnVsbCIsInJldmlzaW9uIjozLCJpc3N1ZWRfYXQiOjE3OTQ5MTY4MDAsInR0bF9zZWNvbmRzIjozMDAsImRpc3BsYXkiOnsicHJvdGVjdGVkIjpmYWxzZSwicHVibGljX2xhYmVsIjpudWxsfX0"
+      },
+      "expected": "no_adoption_no_clear_no_status_inference"
+    },
+    {
+      "name": "non-authoritative403",
+      "http_status": 403,
+      "metadata": {
+        "v": 1,
+        "mode": "full",
+        "revision": 3,
+        "issued_at": 1794916800,
+        "ttl_seconds": 300,
+        "display": {
+          "protected": false,
+          "public_label": null
+        }
+      },
+      "response_headers": {
+        "X-Nora-Metadata": "eyJ2IjoxLCJtb2RlIjoiZnVsbCIsInJldmlzaW9uIjozLCJpc3N1ZWRfYXQiOjE3OTQ5MTY4MDAsInR0bF9zZWNvbmRzIjozMDAsImRpc3BsYXkiOnsicHJvdGVjdGVkIjpmYWxzZSwicHVibGljX2xhYmVsIjpudWxsfX0"
+      },
+      "expected": "no_adoption_no_clear"
+    },
+    {
+      "name": "non-authoritative503",
+      "http_status": 503,
+      "metadata": {
+        "v": 1,
+        "mode": "full",
+        "revision": 3,
+        "issued_at": 1794916800,
+        "ttl_seconds": 300,
+        "display": {
+          "protected": false,
+          "public_label": null
+        }
+      },
+      "response_headers": {
+        "X-Nora-Metadata": "eyJ2IjoxLCJtb2RlIjoiZnVsbCIsInJldmlzaW9uIjozLCJpc3N1ZWRfYXQiOjE3OTQ5MTY4MDAsInR0bF9zZWNvbmRzIjozMDAsImRpc3BsYXkiOnsicHJvdGVjdGVkIjpmYWxzZSwicHVibGljX2xhYmVsIjpudWxsfX0"
+      },
+      "expected": "no_adoption_no_clear"
+    },
+    {
+      "name": "304-does-not-extend",
+      "http_status": 304,
+      "metadata": {
+        "v": 1,
+        "mode": "full",
+        "revision": 2,
+        "issued_at": 1794916800,
+        "ttl_seconds": 300,
+        "display": {
+          "protected": true,
+          "public_label": "NORA — рабочая сеть"
+        }
+      },
+      "response_headers": {
+        "X-Nora-Metadata": "eyJ2IjoxLCJtb2RlIjoiZnVsbCIsInJldmlzaW9uIjoyLCJpc3N1ZWRfYXQiOjE3OTQ5MTY4MDAsInR0bF9zZWNvbmRzIjozMDAsImRpc3BsYXkiOnsicHJvdGVjdGVkIjp0cnVlLCJwdWJsaWNfbGFiZWwiOiJOT1JBIOKAlCDRgNCw0LHQvtGH0LDRjyDRgdC10YLRjCJ9fQ"
+      },
+      "expected": "no_adoption_deadline_1794917100_unchanged"
+    }
+  ],
+  "server_invariant": "metadata wrapper never changes existing HTTPstatus/body/format/expiredrecord/HWID/registration/lifecycle behavior; never makes204",
+  "not_in_wire": [
+    "status",
+    "access",
+    "availability",
+    "message"
+  ],
+  "replay_rules": [
+    "lower revision reject",
+    "same revision policy conflict reject",
+    "older issued_at reject",
+    "same pair conflicting values reject",
+    "identical pair idempotent originaldeadline",
+    "invalid body never advances watermarks"
+  ],
+  "producer_and_client_validation": [
+    "full fields strict types only",
+    "duplicate headers/JSON keys invalid",
+    "strict UTF8/base64url/size caps",
+    "NFC80scalars256bytes no hidden controls",
+    "freshness/origin/HTTPS scope",
+    "other subscriptions unaffected"
+  ]
+}

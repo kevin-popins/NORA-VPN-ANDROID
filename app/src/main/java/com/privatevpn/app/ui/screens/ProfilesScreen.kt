@@ -78,6 +78,8 @@ import com.privatevpn.app.profiles.model.ProfileType
 import com.privatevpn.app.profiles.model.SubscriptionMetadataCodec
 import com.privatevpn.app.profiles.model.SubscriptionSource
 import com.privatevpn.app.profiles.model.SubscriptionSyncStatus
+import com.privatevpn.app.profiles.model.SubscriptionPresentation
+import com.privatevpn.app.profiles.model.userFacingName
 import com.privatevpn.app.profiles.model.VpnProfile
 import com.privatevpn.app.settings.SocksSettings
 import com.privatevpn.app.ui.components.AppSection
@@ -385,7 +387,7 @@ fun ProfilesScreen(
             items(regularProfiles, key = { it.id }) { profile ->
                 ProfileCard(
                     profile = profile,
-                    isActive = profile.id == activeProfileId,
+                    isActive = profile.isConnectable && profile.id == activeProfileId,
                     pingText = serverPingResults[profile.id],
                     onSetActiveProfile = { onSetActiveProfile(profile.id) },
                     onDeleteProfile = { onDeleteProfile(profile.id) },
@@ -399,47 +401,51 @@ fun ProfilesScreen(
     }
 
     detailsProfile?.let { profile ->
-        ProfileDetailsDialog(profile = profile, onDismiss = { detailsProfile = null })
+        profiles.firstOrNull { it.id == profile.id }?.let { current ->
+            ProfileDetailsDialog(profile = current, onDismiss = { detailsProfile = null })
+        }
     }
 
     configProfile?.let { profile ->
-        ProfileConfigDialog(profile = profile, onDismiss = { configProfile = null })
+        profiles.firstOrNull { it.id == profile.id }?.let { current ->
+            ProfileConfigDialog(profile = current, onDismiss = { configProfile = null })
+        }
     }
 
-    renameProfile?.let { profile ->
+    renameProfile?.id?.let { id -> profiles.firstOrNull { it.id == id } }?.let { profile ->
         RenameProfileDialog(
-            initialName = profile.displayName,
+            initialName = profile.userFacingName,
             title = stringResource(R.string.profiles_rename_title),
             fieldLabel = stringResource(R.string.profiles_rename_label),
             onDismiss = { renameProfile = null },
             onConfirm = { newName ->
-                onRenameProfile(profile.id, newName)
+                if (newName != profile.userFacingName) onRenameProfile(profile.id, newName)
                 renameProfile = null
             }
         )
     }
 
-    subscriptionDetails?.let { source ->
+    subscriptionDetails?.id?.let { id -> subscriptions.firstOrNull { it.id == id } }?.let { source ->
         SubscriptionDetailsDialog(
             source = source,
             onDismiss = { subscriptionDetails = null }
         )
     }
 
-    renameSubscription?.let { source ->
+    renameSubscription?.id?.let { id -> subscriptions.firstOrNull { it.id == id } }?.let { source ->
         RenameProfileDialog(
-            initialName = source.displayName,
+            initialName = SubscriptionPresentation.sourceTitle(subscriptions.firstOrNull { it.id == source.id } ?: source),
             title = stringResource(R.string.profiles_subscription_rename_title),
             fieldLabel = stringResource(R.string.profiles_subscription_name_label),
             onDismiss = { renameSubscription = null },
             onConfirm = { newName ->
-                onRenameSubscription(source.id, newName)
+                if (newName != SubscriptionPresentation.sourceTitle(source)) onRenameSubscription(source.id, newName)
                 renameSubscription = null
             }
         )
     }
 
-    editIntervalSubscription?.let { source ->
+    editIntervalSubscription?.id?.let { id -> subscriptions.firstOrNull { it.id == id } }?.let { source ->
         SubscriptionIntervalDialog(
             currentMinutes = source.updateIntervalMinutes,
             onDismiss = { editIntervalSubscription = null },
@@ -450,7 +456,7 @@ fun ProfilesScreen(
         )
     }
 
-    deleteSubscription?.let { source ->
+    deleteSubscription?.id?.let { id -> subscriptions.firstOrNull { it.id == id } }?.let { source ->
         AlertDialog(
             onDismissRequest = { deleteSubscription = null },
             title = { Text(text = stringResource(R.string.profiles_subscription_delete_title)) },
@@ -458,7 +464,7 @@ fun ProfilesScreen(
                 Text(
                     text = stringResource(
                         R.string.profiles_subscription_delete_message,
-                        source.displayName
+                        SubscriptionPresentation.sourceTitle(source)
                     )
                 )
             },
@@ -565,8 +571,8 @@ private fun SubscriptionCard(
     val context = LocalContext.current
     var menuExpanded by remember { mutableStateOf(false) }
     val metadata = remember(source.metadata) { SubscriptionMetadataCodec.decode(source.metadata) }
-    val title = metadata.displayTitle ?: source.displayName
-    val providerLink = metadata.preferredExternalUrl()
+    val title = if (metadata.clientPolicy?.endpointProtectionEnabled == true) SubscriptionPresentation.sourceTitle(source) else metadata.displayTitle ?: source.displayName
+    val providerLink = if (metadata.clientPolicy?.endpointProtectionEnabled == true) null else metadata.preferredExternalUrl()
     val expirySummary = remember(metadata) { formatSubscriptionExpiryLine(metadata) }
     val serversLine = stringResource(
         R.string.profiles_subscription_servers_count,
@@ -577,7 +583,7 @@ private fun SubscriptionCard(
     }
     val resolvedUserId = metadata.userId ?: legendTokens.userId
     val resolvedPlanId = metadata.planId ?: legendTokens.planId
-    val providerMetaLine = remember(metadata, resolvedUserId, resolvedPlanId) {
+    val providerMetaLine = if (metadata.clientPolicy?.endpointProtectionEnabled == true) null else remember(metadata, resolvedUserId, resolvedPlanId) {
         buildList {
             resolvedUserId?.trim()?.takeIf { it.isNotBlank() }?.let { add("ID: $it") }
             resolvedPlanId?.trim()?.takeIf { it.isNotBlank() }?.let { add("#$it") }
@@ -591,7 +597,7 @@ private fun SubscriptionCard(
                 ?.let { add(it) }
         }.joinToString(" • ").takeIf { it.isNotBlank() }
     }
-    val legendLine = buildSubscriptionLegendLine(
+    val legendLine = if (metadata.clientPolicy?.endpointProtectionEnabled == true) null else buildSubscriptionLegendLine(
         labelLine = metadata.labelLine,
         tags = metadata.tags,
         fallbackCandidates = listOf(
@@ -838,7 +844,7 @@ private fun SubscriptionChildProfileRow(
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.small,
-        color = if (profile.id == activeProfileId) {
+        color = if (profile.isConnectable && profile.id == activeProfileId) {
             MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
         } else {
             MaterialTheme.colorScheme.surfaceVariant
@@ -848,19 +854,20 @@ private fun SubscriptionChildProfileRow(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .softClickable { onSelectProfile(profile.id) }
+                .softClickable(enabled = profile.isConnectable) { onSelectProfile(profile.id) }
                 .heightIn(min = 44.dp)
                 .padding(horizontal = AppSpacing.xs, vertical = AppSpacing.xxs),
             verticalAlignment = Alignment.CenterVertically
         ) {
             RadioButton(
-                selected = profile.id == activeProfileId,
+                selected = profile.isConnectable && profile.id == activeProfileId,
+                enabled = profile.isConnectable,
                 onClick = { onSelectProfile(profile.id) }
             )
             Text(
-                text = noraProfileDisplayName(profile.displayName),
+                text = if (profile.isTechnicalEntry) profile.displayName else noraProfileDisplayName(profile.userFacingName),
                 style = MaterialTheme.typography.bodyMedium,
-                fontWeight = if (profile.id == activeProfileId) FontWeight.SemiBold else FontWeight.Normal,
+                fontWeight = if (profile.isConnectable && profile.id == activeProfileId) FontWeight.SemiBold else FontWeight.Normal,
                 modifier = Modifier.weight(1f),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
@@ -959,7 +966,7 @@ private fun ProfileCard(
     val countryFlag = remember(profile.displayName) { resolveNoraRegion(profile.displayName)?.flag }
 
     Surface(
-        modifier = Modifier.fillMaxWidth().softClickable(onClick = onSetActiveProfile),
+        modifier = Modifier.fillMaxWidth().softClickable(enabled = profile.isConnectable, onClick = onSetActiveProfile),
         shape = androidx.compose.foundation.shape.RoundedCornerShape(18.dp),
         color = NoraInkElevated,
         border = BorderStroke(1.dp, if (isActive) NoraAmber.copy(alpha = 0.78f) else NoraLine),
@@ -996,7 +1003,7 @@ private fun ProfileCard(
                     }
                     Spacer(Modifier.size(10.dp))
                     Column {
-                        Text(text = noraProfileDisplayName(profile.displayName), style = MaterialTheme.typography.titleMedium, color = NoraText, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(text = if (profile.isTechnicalEntry) profile.displayName else noraProfileDisplayName(profile.userFacingName), style = MaterialTheme.typography.titleMedium, color = NoraText, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text(
                             text = profileTypeLabel(profile.type),
                             style = MaterialTheme.typography.labelSmall,
@@ -1033,6 +1040,7 @@ private fun ProfileCard(
                     modifier = Modifier.weight(1f),
                     label = if (isActive) "Выбран" else "Выбрать",
                     icon = Icons.Default.Storage,
+                    enabled = profile.isConnectable,
                     onClick = onSetActiveProfile
                 )
                 WideServerAction(
@@ -1079,6 +1087,14 @@ private fun SubscriptionDetailsDialog(
         SubscriptionMetadataCodec.decode(source.metadata)
     }
     val diagnostics = metadata.diagnostics
+    if (metadata.clientPolicy?.endpointProtectionEnabled == true) {
+        ProtectedInformationDialog(
+            title = SubscriptionPresentation.sourceTitle(source),
+            label = metadata.clientPolicy.publicDisplayLabel,
+            onDismiss = onDismiss
+        )
+        return
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1323,6 +1339,11 @@ private fun ProfileDetailsDialog(
     profile: VpnProfile,
     onDismiss: () -> Unit
 ) {
+    if (profile.endpointProtectionEnabled) {
+        ProtectedInformationDialog(noraProfileDisplayName(profile.userFacingName), profile.protectedPublicLabel ?: "Защищённый сервер", onDismiss)
+        return
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         confirmButton = {
@@ -1369,6 +1390,10 @@ private fun ProfileConfigDialog(
     profile: VpnProfile,
     onDismiss: () -> Unit
 ) {
+    if (profile.endpointProtectionEnabled) {
+        ProtectedInformationDialog("Защищённый профиль", profile.protectedPublicLabel ?: "Защищённый сервер", onDismiss)
+        return
+    }
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     var hideSecrets by rememberSaveable { mutableStateOf(true) }
@@ -1384,7 +1409,7 @@ private fun ProfileConfigDialog(
                 Text(text = stringResource(R.string.profiles_error_close))
             }
         },
-        title = { Text(text = stringResource(R.string.profiles_config_viewer_title, noraProfileDisplayName(profile.displayName))) },
+        title = { Text(text = stringResource(R.string.profiles_config_viewer_title, noraProfileDisplayName(profile.userFacingName))) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Row(
@@ -1924,4 +1949,13 @@ private fun socksStatusLabel(
     } else {
         "Не настроен"
     }
+}
+
+@Composable
+private fun ProtectedInformationDialog(title: String, label: String, onDismiss: () -> Unit) {
+    AlertDialog(onDismissRequest = onDismiss, title = { Text(title) },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(label)
+            Text("Провайдер защитил адреса этой подписки. Просмотр, копирование и передача конфигурации недоступны.", color = NoraMuted)
+        } }, confirmButton = { TextButton(onClick = onDismiss) { Text("Закрыть") } })
 }

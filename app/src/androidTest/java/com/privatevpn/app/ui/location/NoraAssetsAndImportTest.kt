@@ -24,7 +24,7 @@ class NoraAssetsAndImportTest {
     @Test
     fun allPackagedLocationImagesDecodeOffline() {
         val images = R.drawable::class.java.fields.filter { it.name.startsWith("nora_location_") }
-        assertEquals("47 existing backgrounds plus five Antarctica frames", 52, images.size)
+        assertEquals("52 preserved backgrounds plus six Bermuda/Vatican frames", 58, images.size)
         var totalMs = 0L
         for (image in images) {
             val start = SystemClock.elapsedRealtime()

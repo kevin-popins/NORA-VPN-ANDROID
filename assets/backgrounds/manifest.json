@@ -5,10 +5,10 @@
     "libwebp": "1.5.0"
   },
   "policy": "native dimensions; opaque WebP q95; RGBA lossless exact",
-  "asset_count": 52,
-  "source_bytes": 118274151,
-  "shipping_bytes": 22919980,
-  "reduction_percent": 80.6213,
+  "asset_count": 58,
+  "source_bytes": 136584805,
+  "shipping_bytes": 26891144,
+  "reduction_percent": 80.3118,
   "assets": [
     {
       "resource": "nora_location_antarctica1",
@@ -90,6 +90,60 @@
       "output": "app/src/main/res/drawable-nodpi/nora_location_antarctica5.webp",
       "output_sha256": "ae58d20c1cf87f2cefc9ff2b61e00c6ffb2fe51bfbe0fa1d088960754550c25a",
       "output_bytes": 576548,
+      "width": 1672,
+      "height": 941,
+      "mode": "RGB",
+      "parameters": {
+        "lossless": false,
+        "quality": 95,
+        "method": 6,
+        "exact": true
+      }
+    },
+    {
+      "resource": "nora_location_bermuda1",
+      "source": "assets/backgrounds/masters/nora_location_bermuda1.png",
+      "source_sha256": "923e4349c86172b6e11f1054e363f55e9fc81122671f0151055838fb27227d9b",
+      "source_bytes": 2859572,
+      "output": "app/src/main/res/drawable-nodpi/nora_location_bermuda1.webp",
+      "output_sha256": "bbec35ddbf9905ed85acc3c7f1428eeeb9cf164d48089b554445aca06f567e43",
+      "output_bytes": 585072,
+      "width": 1672,
+      "height": 941,
+      "mode": "RGB",
+      "parameters": {
+        "lossless": false,
+        "quality": 95,
+        "method": 6,
+        "exact": true
+      }
+    },
+    {
+      "resource": "nora_location_bermuda2",
+      "source": "assets/backgrounds/masters/nora_location_bermuda2.png",
+      "source_sha256": "242607ee834904b75a421746c2ccb7b09fdcd142db12786b09a5ee6cb5af948f",
+      "source_bytes": 2989947,
+      "output": "app/src/main/res/drawable-nodpi/nora_location_bermuda2.webp",
+      "output_sha256": "1566ad4db1c216e609cb478341b1b19e1a65c788bfff036167ff7e42dc409a07",
+      "output_bytes": 656658,
+      "width": 1672,
+      "height": 941,
+      "mode": "RGB",
+      "parameters": {
+        "lossless": false,
+        "quality": 95,
+        "method": 6,
+        "exact": true
+      }
+    },
+    {
+      "resource": "nora_location_bermuda3",
+      "source": "assets/backgrounds/masters/nora_location_bermuda3.png",
+      "source_sha256": "5ce0fb22dc3b690eafc59c096f0b1919e2ca134aad492209689df17be17c253b",
+      "source_bytes": 3283836,
+      "output": "app/src/main/res/drawable-nodpi/nora_location_bermuda3.webp",
+      "output_sha256": "160d3955678f3a9c8498f9b1a77ce578aa8abbef1dbc883b018499f75fe03804",
+      "output_bytes": 736886,
       "width": 1672,
       "height": 941,
       "mode": "RGB",
@@ -918,6 +972,60 @@
       "output": "app/src/main/res/drawable-nodpi/nora_location_usa3.webp",
       "output_sha256": "b6195c6ecfa4926b85268be52a98840f6b0ede798ccd726fa9219365dd83fee8",
       "output_bytes": 471894,
+      "width": 1672,
+      "height": 941,
+      "mode": "RGB",
+      "parameters": {
+        "lossless": false,
+        "quality": 95,
+        "method": 6,
+        "exact": true
+      }
+    },
+    {
+      "resource": "nora_location_vatican1",
+      "source": "assets/backgrounds/masters/nora_location_vatican1.png",
+      "source_sha256": "ad92ca4a31c93eb0f59c845281e831a3d3376d78857fcd60c55e152846c6846d",
+      "source_bytes": 2873931,
+      "output": "app/src/main/res/drawable-nodpi/nora_location_vatican1.webp",
+      "output_sha256": "3ff16211a763902d92682f8a3f0f5ef5277c8b5efd1210fb789c82efe0a453dc",
+      "output_bytes": 611142,
+      "width": 1672,
+      "height": 941,
+      "mode": "RGB",
+      "parameters": {
+        "lossless": false,
+        "quality": 95,
+        "method": 6,
+        "exact": true
+      }
+    },
+    {
+      "resource": "nora_location_vatican2",
+      "source": "assets/backgrounds/masters/nora_location_vatican2.png",
+      "source_sha256": "8bb37a3ebcecc96716a33688e3603cd1ccbf347f5be25ebfa10dc59a93cf4e72",
+      "source_bytes": 3171724,
+      "output": "app/src/main/res/drawable-nodpi/nora_location_vatican2.webp",
+      "output_sha256": "c2f52ffa1cdbbef71bae0fae1cbea48e3dbcbb327698c6eb426710474dbd7d3b",
+      "output_bytes": 694764,
+      "width": 1672,
+      "height": 941,
+      "mode": "RGB",
+      "parameters": {
+        "lossless": false,
+        "quality": 95,
+        "method": 6,
+        "exact": true
+      }
+    },
+    {
+      "resource": "nora_location_vatican3",
+      "source": "assets/backgrounds/masters/nora_location_vatican3.png",
+      "source_sha256": "b2d375caf9240a568a92fa63df535f44ea4f3722130e7109fbea628186c37a07",
+      "source_bytes": 3131644,
+      "output": "app/src/main/res/drawable-nodpi/nora_location_vatican3.webp",
+      "output_sha256": "2c59d9bc8d097a3b4874534347101224a105961abd14eee5d939645c44d75e76",
+      "output_bytes": 686642,
       "width": 1672,
       "height": 941,
       "mode": "RGB",

@@ -41,6 +41,7 @@ class AmneziaWgBackendAdapter(
         socksSettings: SocksSettings
     ): Result<BackendStartResult> {
         return runCatching {
+            check(profile.isConnectable) { "Запись недоступна для подключения" }
             synchronized(stateLock) {
                 if (startInProgress) {
                     throw IllegalStateException("Запуск AWG backend уже выполняется")

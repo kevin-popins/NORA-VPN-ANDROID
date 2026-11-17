@@ -2,6 +2,15 @@ package com.privatevpn.app.ui
 
 import com.privatevpn.app.ui.location.noraProfileDisplayName
 
+import androidx.room.withTransaction
+import com.privatevpn.app.ui.qr.QrImportCoordinator
+import com.privatevpn.app.ui.qr.QrImportException
+import com.privatevpn.app.ui.qr.QrImportFailureCode
+import com.privatevpn.app.profiles.subscriptions.SubscriptionImportException
+import com.privatevpn.app.profiles.subscriptions.SubscriptionImportFailure
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.withLock
 import android.app.Application
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -38,6 +47,11 @@ import com.privatevpn.app.profiles.deeplink.NoraDeepLinkImport
 import com.privatevpn.app.profiles.deeplink.NoraDeepLinkParser
 import com.privatevpn.app.profiles.importer.ProfileImportParser
 import com.privatevpn.app.profiles.model.ImportedProfileDraft
+import com.privatevpn.app.profiles.importer.ProfileInput
+import com.privatevpn.app.profiles.importer.ProfileInputParser
+import kotlinx.coroutines.CancellationException
+import com.privatevpn.app.profiles.model.SubscriptionPresentation
+import com.privatevpn.app.profiles.model.userFacingName
 import com.privatevpn.app.profiles.model.ProfileType
 import com.privatevpn.app.profiles.model.SubscriptionSource
 import com.privatevpn.app.profiles.model.SubscriptionSyncStatus
@@ -49,6 +63,7 @@ import com.privatevpn.app.profiles.subscriptions.RoomSubscriptionRepository
 import com.privatevpn.app.profiles.subscriptions.SubscriptionParser
 import com.privatevpn.app.profiles.subscriptions.SubscriptionRefreshResult
 import com.privatevpn.app.profiles.subscriptions.SubscriptionUpdateWorker
+import com.privatevpn.app.profiles.subscriptions.SubscriptionServiceRecords
 import com.privatevpn.app.settings.DnsMode
 import com.privatevpn.app.settings.DnsResolvedSource
 import com.privatevpn.app.settings.DnsState
@@ -103,6 +118,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val installedAppsRepository = AndroidInstalledAppsRepository(application.applicationContext)
     private val appIconRepository = AppIconRepository(application.applicationContext)
     private val vpnSystemSettingsRepository = VpnSystemSettingsRepository(application.applicationContext)
+    private val profileInputParser = ProfileInputParser()
     private val profileImportParser = ProfileImportParser()
     private val externalSubscriptionParser = SubscriptionParser(profileImportParser)
     private val vpnManager = VpnManager(VpnController(application.applicationContext))
@@ -153,6 +169,38 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val _pingInProgress = MutableStateFlow(false)
 
     val addContentEvents = _addContentEvents.receiveAsFlow()
+    private val qrPersistenceMutex = Mutex()
+    private var currentQrScan: Long? = null
+    private var acceptedQrImport: Long? = null
+    private val qrImports = QrImportCoordinator(viewModelScope) { raw ->
+        val token = acceptedQrImport ?: throw CancellationException()
+        importQrPayloadInternal(raw, token)
+    }
+    val qrImportState = qrImports.state
+
+    fun beginQrScan(): Long {
+        acceptedQrImport = null
+        return qrImports.beginScan().also { currentQrScan = it }
+    }
+    fun closeQrScan(token: Long) {
+        qrImports.closeScan(token)
+        if (currentQrScan == token && acceptedQrImport != token) currentQrScan = null
+    }
+    fun importScannedQr(token: Long, raw: String): Boolean {
+        if (currentQrScan != token || acceptedQrImport == token) return false
+        acceptedQrImport = token
+        return qrImports.submit(token, raw).also { accepted ->
+            if (!accepted && acceptedQrImport == token) acceptedQrImport = null
+        }
+    }
+    fun cancelQrImport() {
+        acceptedQrImport = null
+        currentQrScan = null
+        qrImports.cancelImport()
+    }
+    fun dismissQrImportError() = qrImports.dismissError()
+    fun isCurrentQrImport(token: Long): Boolean = acceptedQrImport == token
+
 
     private var logCounter: Long = 0
     private var lastRuntimeErrorLogged: String? = null
@@ -173,7 +221,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val refreshingSubscriptionIds: Set<String>,
         val settings: SettingsState,
         val connectionError: String?,
-        val logs: List<EventLogEntry>
+        val logs: List<EventLogEntry>,
+        val redact: (String) -> String
     )
 
     private data class CoreUiStateWithoutLogs(
@@ -183,7 +232,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val subscriptions: List<SubscriptionSource>,
         val refreshingSubscriptionIds: Set<String>,
         val settings: SettingsState,
-        val connectionError: String?
+        val connectionError: String?,
+        val redact: (String) -> String
     )
 
     private data class PrivateSessionAuxState(
@@ -207,25 +257,31 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val appTrafficMode: AppTrafficMode,
         val profiles: List<VpnProfile>,
         val subscriptions: List<SubscriptionSource>,
-        val refreshingSubscriptionIds: Set<String>
+        val refreshingSubscriptionIds: Set<String>,
+        val redact: (String) -> String
     )
+
+    private data class PresentedProfiles(val profiles: List<VpnProfile>, val sources: List<SubscriptionSource>, val redact: (String) -> String)
+
+    private val presentedProfilesState = combine(profilesRepository.profiles, subscriptionRepository.subscriptions) { profiles, sources ->
+        PresentedProfiles(profiles.map { SubscriptionPresentation.apply(it, sources) }, sources, SubscriptionPresentation.redactor(profiles, sources))
+    }
 
     private val runtimeProfilesState = combine(
         vpnManager.status,
         vpnManager.appTrafficMode,
-        profilesRepository.profiles,
-        subscriptionRepository.subscriptions,
+        presentedProfilesState,
         _refreshingSubscriptionIds
     ) { status,
         appTrafficMode,
-        profiles,
-        subscriptions,
+        presentation,
         refreshingSubscriptionIds ->
         RuntimeProfilesState(
             status = status,
             appTrafficMode = appTrafficMode,
-            profiles = profiles,
-            subscriptions = subscriptions,
+            profiles = presentation.profiles,
+            subscriptions = presentation.sources,
+            redact = presentation.redact,
             refreshingSubscriptionIds = refreshingSubscriptionIds
         )
     }
@@ -244,7 +300,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             subscriptions = runtime.subscriptions,
             refreshingSubscriptionIds = runtime.refreshingSubscriptionIds,
             settings = settings,
-            connectionError = connectionError
+            connectionError = connectionError,
+            redact = runtime.redact
         )
     }
 
@@ -260,7 +317,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             refreshingSubscriptionIds = core.refreshingSubscriptionIds,
             settings = core.settings,
             connectionError = core.connectionError,
-            logs = logs
+            logs = logs,
+            redact = core.redact
         )
     }
 
@@ -317,7 +375,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         uiAux,
         traffic,
         sessionHistory ->
-        val activeProfile = coreState.profiles.firstOrNull { it.id == coreState.settings.activeProfileId }
+        val presentedProfiles = coreState.profiles
+        val activeProfile = presentedProfiles.firstOrNull { it.id == coreState.settings.activeProfileId && it.isConnectable }
         val dnsState = resolveDnsState(settings = coreState.settings, activeProfile = activeProfile)
         val draftTrustedPackages = if (privateSessionAux.draftDirty) {
             privateSessionAux.draftTrustedPackages
@@ -330,16 +389,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             // Home uses this to avoid showing onboarding while Room is still reading profiles.
             profilesLoaded = true,
             vpnStatus = coreState.status,
-            profiles = coreState.profiles,
+            profiles = presentedProfiles,
             subscriptions = coreState.subscriptions,
             refreshingSubscriptionIds = coreState.refreshingSubscriptionIds,
             activeProfileId = coreState.settings.activeProfileId,
             activeProfile = activeProfile,
-            activeProfileServer = resolveProfileServer(activeProfile),
-            connectionError = coreState.connectionError,
+            activeProfileServer = if (activeProfile?.endpointProtectionEnabled == true) activeProfile.protectedPublicLabel else resolveProfileServer(activeProfile),
+            connectionError = coreState.connectionError?.let { coreState.redact(it) },
             serverPingResults = uiAux.serverPingResults,
             pingInProgress = uiAux.pingInProgress,
-            eventLogs = coreState.logs,
+            eventLogs = coreState.logs.map { it.copy(message = coreState.redact(it.message)) },
             privateSessionState = PrivateSessionState(
                 enabled = coreState.settings.privateSessionEnabled,
                 startedAtMs = coreState.settings.privateSessionStartedAtMs
@@ -359,7 +418,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             dnsState = dnsState,
             appTrafficMode = coreState.appTrafficMode,
             traffic = traffic,
-            sessionHistory = sessionHistory,
+            sessionHistory = sessionHistory.map { it.copy(profileName = coreState.redact(it.profileName)) },
             notificationPermission = NotificationPermissionUiState(
                 supported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU,
                 granted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -369,7 +428,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 },
                 promptShown = coreState.settings.notificationPermissionPromptShown
             ),
-            transientMessage = uiAux.transientMessage
+            transientMessage = uiAux.transientMessage?.let(coreState.redact)
         )
     }.stateIn(
         scope = viewModelScope,
@@ -419,10 +478,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
         viewModelScope.launch {
             combine(
-                profilesRepository.profiles,
+                presentedProfilesState,
                 userSettingsRepository.settings
-            ) { profiles, settings ->
-                profiles.firstOrNull { it.id == settings.activeProfileId }?.displayName
+            ) { presentation, settings ->
+                presentation.profiles.firstOrNull { it.id == settings.activeProfileId && it.isConnectable }?.userFacingName
             }.collect { activeName ->
                 if (!activeName.isNullOrBlank()) {
                     vpnManager.updateActiveProfileName(activeName)
@@ -446,6 +505,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun requestVpnPermissionIntent(): Intent? {
+        val snapshot = uiState.value
+        if (snapshot.profiles.none { it.isConnectable } ||
+            snapshot.profiles.any { it.id == snapshot.activeProfileId && !it.isConnectable }) return null
         return vpnManager.getPrepareIntent()
     }
 
@@ -601,14 +663,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun connectVpnInternal() {
         val snapshot = uiState.value
-        if (snapshot.profiles.isEmpty()) {
+        val connectableProfiles = snapshot.profiles.filter { it.isConnectable }
+        if (connectableProfiles.isEmpty()) {
             emitTransientMessage(
                 "Нет доступных профилей. Перейдите в раздел «Профили», импортируйте профиль или добавьте подписку."
             )
             addLog(LogLevel.INFO, "Подключение отменено: нет доступных профилей")
             return
         }
-        var profile = snapshot.activeProfile ?: snapshot.profiles.first()
+        val storedSelection = snapshot.profiles.firstOrNull { it.id == snapshot.activeProfileId }
+        if (storedSelection != null && !storedSelection.isConnectable) return
+        var profile = snapshot.activeProfile ?: connectableProfiles.first()
         profile = recoverProfileWithMissingShortId(profile)
         logSelectedProfileShortIdTrace(profile)
 
@@ -667,11 +732,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         snapshot: AppUiState,
         switchPerformed: Boolean
     ) {
+        if (!profile.isConnectable) return
+        val presentedProfile = SubscriptionPresentation.apply(profile, snapshot.subscriptions)
         val targetType = profile.type
         val backendAdapter = resolveBackendAdapter(targetType)
         val startResult = startBackendWithWarmupRetry(
             backendAdapter = backendAdapter,
-            profile = profile,
+            profile = presentedProfile.copy(displayName = presentedProfile.userFacingName),
             dnsServers = snapshot.dnsState.resolvedServers,
             privateSessionEnabled = snapshot.privateSessionUiState.enabled,
             trustedPackages = snapshot.privateSessionUiState.trustedPackages,
@@ -685,8 +752,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             activeBackendProfileType = profile.type
             lastBackendProfileType = profile.type
             _connectionError.value = null
-            vpnManager.updateActiveProfileName(profile.displayName)
-            VpnRuntimeStateStore.setLastSelectedProfileName(profile.displayName)
+            vpnManager.updateActiveProfileName(profile.userFacingName)
+            VpnRuntimeStateStore.setLastSelectedProfileName(profile.userFacingName)
             addLog(LogLevel.INFO, "Запрошено подключение VPN")
             addLog(LogLevel.INFO, "Выбран backend: ${backendTypeLabel(profile.type)}")
             result.notes.forEach { note -> addLog(LogLevel.INFO, note) }
@@ -761,7 +828,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun importProfileFromFile(uri: Uri) {
         viewModelScope.launch {
-            val rawInput = readProfileFile(uri).getOrElse { error ->
+            val rawInput = withContext(Dispatchers.IO) { readProfileFile(uri) }.getOrElse { error ->
                 handleError(
                     userMessage = "Не удалось прочитать файл профиля",
                     error = error,
@@ -776,7 +843,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun importProfileFromFileFromAddScreen(uri: Uri) {
         viewModelScope.launch {
-            val rawInput = readProfileFile(uri).getOrElse { error ->
+            val rawInput = withContext(Dispatchers.IO) { readProfileFile(uri) }.getOrElse { error ->
                 emitAddContentFailure(
                     AppErrors.fromThrowable(
                         error = error,
@@ -803,11 +870,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun importExternalIntent(intent: Intent) {
         viewModelScope.launch {
-            val deepLink = intent.dataString?.takeIf(NoraDeepLinkParser::isNoraDeepLink)
-            if (deepLink != null) {
-                importNoraDeepLink(deepLink)
-                return@launch
-            }
             val payloads = withContext(Dispatchers.IO) {
                 extractExternalImportPayloads(intent)
             }
@@ -828,7 +890,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun addSubscription(sourceUrl: String, displayName: String?) {
         viewModelScope.launch(Dispatchers.IO) {
-            addSubscriptionInternal(sourceUrl = sourceUrl, displayName = displayName)
+            importProfileInternal(sourceUrl, "текст", displayName = displayName)
         }
     }
 
@@ -861,11 +923,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun addSubscriptionFromAddScreen(sourceUrl: String, displayName: String?) {
         viewModelScope.launch(Dispatchers.IO) {
-            addSubscriptionInternal(
-                sourceUrl = sourceUrl,
-                displayName = displayName,
-                reportToAddScreen = true
-            )
+            importProfileInternal(sourceUrl, "текст", reportToAddScreen = true, displayName = displayName)
         }
     }
 
@@ -1147,6 +1205,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
+        if (!profile.isConnectable) return
         if (!isVpnConnectedOrConnecting(snapshot.vpnStatus)) {
             viewModelScope.launch {
                 persistActiveProfileSelection(profile)
@@ -1188,6 +1247,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
+        if (!profile.isConnectable) return
         val beforeStop = uiState.value
         val currentStatus = vpnManager.status.value
         if (!isVpnConnectedOrConnecting(currentStatus)) {
@@ -1216,7 +1276,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (!stopped) return
 
         profileSwitchRequests.takeLatest()?.let { latestId ->
-            uiState.value.profiles.firstOrNull { it.id == latestId }?.let { latestProfile ->
+            uiState.value.profiles.firstOrNull { it.id == latestId && it.isConnectable }?.let { latestProfile ->
                 profile = latestProfile
                 addLog(LogLevel.INFO, "PROFILE SWITCH: применён последний выбор '${latestProfile.displayName}'")
             }
@@ -1261,6 +1321,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun persistActiveProfileSelection(profile: VpnProfile): Boolean {
+        if (!profile.isConnectable) return false
         return runCatching {
             userSettingsRepository.setActiveProfile(profile.id)
             profile.parentSubscriptionId?.let { parentId ->
@@ -1277,8 +1338,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }.onSuccess {
-            vpnManager.updateActiveProfileName(profile.displayName)
-            VpnRuntimeStateStore.setLastSelectedProfileName(profile.displayName)
+            vpnManager.updateActiveProfileName(profile.userFacingName)
+            VpnRuntimeStateStore.setLastSelectedProfileName(profile.userFacingName)
             addLog(LogLevel.INFO, "Активный профиль: ${profile.displayName}")
         }.onFailure { error ->
             handleError(
@@ -1486,7 +1547,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             try {
-                val snapshotProfiles = profilesRepository.profiles.first()
+                val snapshotProfiles = profilesRepository.profiles.first().filter { it.isConnectable }
                 if (snapshotProfiles.isEmpty()) {
                     emitTransientMessage("Нет серверов для проверки пинга")
                     return@launch
@@ -1576,7 +1637,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private fun resolveRequestedProfileType(): ProfileType {
         val snapshot = uiState.value
         return snapshot.activeProfile?.type
-            ?: snapshot.profiles.firstOrNull()?.type
+            ?: snapshot.profiles.firstOrNull { it.isConnectable }?.type
             ?: ProfileType.XRAY_JSON
     }
 
@@ -1946,95 +2007,95 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private suspend fun importQrPayloadInternal(raw: String, token: Long) = qrPersistenceMutex.withLock {
+        try {
+            val input = try {
+                withContext(Dispatchers.IO) { profileInputParser.parse(raw) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                throw QrImportException(QrImportFailureCode.UNSUPPORTED)
+            }
+            currentCoroutineContext().ensureActive()
+            if (!isCurrentQrImport(token)) throw CancellationException()
+            when (input) {
+                is ProfileInput.Routing -> throw QrImportException(QrImportFailureCode.UNSUPPORTED)
+                is ProfileInput.Profiles -> {
+                    if (input.drafts.any { SubscriptionServiceRecords.isServiceRecord(it.sourceRaw, it.normalizedJson) &&
+                            !SubscriptionServiceRecords.isKnownTechnicalEntry(it.sourceRaw, it.normalizedJson) }) {
+                        throw QrImportException(QrImportFailureCode.UNSUPPORTED)
+                    }
+                    val imported = withContext(Dispatchers.IO) {
+                        database.withTransaction {
+                            val profiles = input.drafts.map { persistImportedDraft(it) }
+                            currentCoroutineContext().ensureActive()
+                            profiles
+                        }
+                    }
+                    imported.forEachIndexed { index, profile ->
+                        currentCoroutineContext().ensureActive()
+                        if (!isCurrentQrImport(token)) throw CancellationException()
+                        handleImportedProfileSuccess(profile, "QR", index == imported.lastIndex, token)
+                    }
+                }
+                is ProfileInput.Subscription -> {
+                    val source = try {
+                        subscriptionRepository.importValidatedSubscription(input.url, input.displayName)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (error: SubscriptionImportException) {
+                        throw QrImportException(if (error.reason == SubscriptionImportFailure.INVALID_INPUT)
+                            QrImportFailureCode.UNSUPPORTED else QrImportFailureCode.LOAD_FAILED)
+                    }
+                    currentCoroutineContext().ensureActive()
+                    if (!isCurrentQrImport(token)) throw CancellationException()
+                    _addContentEvents.send(AddContentEvent.Success(
+                        AddedServerTarget.Subscription(source.id), "Подписка добавлена", qrSession = token, clearManualDraft = false
+                    ))
+                    SubscriptionUpdateWorker.schedule(getApplication<Application>().applicationContext)
+                }
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (safe: QrImportException) {
+            throw safe
+        } catch (_: Exception) {
+            throw QrImportException(QrImportFailureCode.LOAD_FAILED)
+        }
+    }
+
     private suspend fun importProfileInternal(
         rawInput: String,
         sourceLabel: String,
-        reportToAddScreen: Boolean = false
+        reportToAddScreen: Boolean = false,
+        displayName: String? = null
     ) {
-        runCatching {
-            val parsed = profileImportParser.parse(rawInput)
-            persistImportedDraft(parsed)
-        }.onSuccess { imported ->
-            handleImportedProfileSuccess(
-                imported = imported,
-                sourceLabel = sourceLabel,
-                reportToAddScreen = reportToAddScreen
-            )
-        }.onFailure { error ->
-            val isUnsupportedFormat = error.message
-                ?.contains("Неподдерживаемый формат профиля", ignoreCase = true) == true
-            val appError = if (isUnsupportedFormat) {
-                AppErrors.profileUnsupported(error.message)
-            } else {
-                AppErrors.fromThrowable(
-                    error = error,
-                    fallbackCode = AppErrorCode.IMPORT_001,
-                    fallbackUserMessage = "Ошибка импорта профиля"
+        try {
+            when (val input = withContext(Dispatchers.IO) { profileInputParser.parse(rawInput, displayName) }) {
+                is ProfileInput.Subscription -> addSubscriptionInternal(
+                    sourceUrl = input.url, displayName = input.displayName, reportToAddScreen = reportToAddScreen
+                )
+                is ProfileInput.Profiles -> {
+                    val imported = withContext(Dispatchers.IO) { input.drafts.map { persistImportedDraft(it) } }
+                    imported.forEachIndexed { index, profile ->
+                        handleImportedProfileSuccess(profile, sourceLabel, reportToAddScreen && index == imported.lastIndex)
+                    }
+                }
+                is ProfileInput.Routing -> emitTransientMessage(
+                    "HAPP Routing получен. Откройте ссылку профиля или подписки вместе с routing."
                 )
             }
-            if (reportToAddScreen) {
-                emitAddContentFailure(appError)
-            } else {
-                applyUiError(appError)
-            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            // Parser errors describe a category only; payloads and private URLs never enter diagnostics.
+            val appError = AppErrors.profileImportFailed(technicalReason = "Input rejected: ${error.javaClass.simpleName}")
+            if (reportToAddScreen) emitAddContentFailure(appError) else applyUiError(appError)
         }
     }
 
     private suspend fun importExternalPayload(rawInput: String, sourceLabel: String) {
-        val candidate = extractExternalImportCandidate(rawInput)
-        if (candidate.isBlank()) {
-            applyUiError(AppErrors.profileUnsupported("В переданных данных не найден профиль или URL подписки"))
-            return
-        }
-
-        if (isHappEncryptedLink(candidate)) {
-            val decrypted = runCatching {
-                HappCrypt5Decryptor.decryptToText(candidate)
-            }.getOrElse { error ->
-                handleError(
-                    userMessage = "Не удалось расшифровать HAPP-ссылку",
-                    error = error,
-                    fallbackCode = AppErrorCode.IMPORT_001
-                )
-                return
-            }
-            addLog(LogLevel.INFO, "HAPP crypt5 ссылка расшифрована")
-            if (isHttpSubscriptionUrl(decrypted)) {
-                addSubscriptionInternal(sourceUrl = decrypted, displayName = null)
-            } else {
-                importExternalPayload(rawInput = decrypted, sourceLabel = "$sourceLabel/HAPP")
-            }
-            return
-        }
-
-        if (isHttpSubscriptionUrl(candidate)) {
-            addSubscriptionInternal(sourceUrl = candidate, displayName = null)
-            return
-        }
-
-        val parsedSubscription = externalSubscriptionParser.parse(rawInput)
-        if (parsedSubscription.validProfiles.isNotEmpty() &&
-            (parsedSubscription.validProfiles.size > 1 || parsedSubscription.happRoutingProfile != null)
-        ) {
-            val routingProfile = parsedSubscription.happRoutingProfile
-            val imported = parsedSubscription.validProfiles.map { draft ->
-                val routedDraft = routingProfile?.let { HappRoutingCompat.applyRoutingToDraft(draft, it) } ?: draft
-                persistImportedDraft(routedDraft)
-            }
-            imported.forEach { profile -> handleImportedProfileSuccess(imported = profile, sourceLabel = sourceLabel) }
-            emitTransientMessage("Импортировано профилей: ${imported.size}")
-            return
-        }
-
-        if (HappRoutingCompat.isRoutingLink(candidate)) {
-            val routingProfile = HappRoutingCompat.findFirstRoutingProfile(candidate)
-            val routeName = routingProfile?.name?.takeIf { it.isNotBlank() } ?: "HAPP"
-            addLog(LogLevel.INFO, "HAPP Routing '$routeName' получен отдельно; будет применён при импорте подписки/профиля с routing в одном payload")
-            emitTransientMessage("HAPP Routing получен. Откройте ссылку профиля или подписки вместе с routing.")
-            return
-        }
-
-        importProfileInternal(rawInput = candidate, sourceLabel = sourceLabel)
+        importProfileInternal(rawInput, sourceLabel)
     }
 
     private suspend fun persistImportedDraft(parsed: ImportedProfileDraft): VpnProfile {
@@ -2057,10 +2118,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun handleImportedProfileSuccess(
         imported: VpnProfile,
         sourceLabel: String,
-        reportToAddScreen: Boolean = false
+        reportToAddScreen: Boolean = false,
+        qrSession: Long? = null
     ) {
         val settingsSnapshot = uiState.value.settingsState
-        if (settingsSnapshot.activeProfileId == null) {
+        if (settingsSnapshot.activeProfileId == null && imported.isConnectable) {
             userSettingsRepository.setActiveProfile(imported.id)
             vpnManager.updateActiveProfileName(imported.displayName)
             VpnRuntimeStateStore.setLastSelectedProfileName(imported.displayName)
@@ -2082,7 +2144,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             _addContentEvents.send(
                 AddContentEvent.Success(
                     target = AddedServerTarget.Profile(imported.id),
-                    message = message
+                    message = message,
+                    qrSession = qrSession,
+                    clearManualDraft = qrSession == null
                 )
             )
         } else {
@@ -2215,7 +2279,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             id = logCounter,
             timestampMs = System.currentTimeMillis(),
             level = level,
-            message = message
+            message = SubscriptionPresentation.redact(message, uiState.value.profiles, uiState.value.subscriptions)
         )
 
         _logs.update { current -> listOf(entry) + current.take(199) }

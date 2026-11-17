@@ -7,6 +7,7 @@ interface SubscriptionRepository {
     val subscriptions: Flow<List<SubscriptionSource>>
 
     suspend fun addSubscription(sourceUrl: String, displayName: String?): SubscriptionSource
+    suspend fun importValidatedSubscription(sourceUrl: String, displayName: String?): SubscriptionSource
     suspend fun deleteSubscription(subscriptionId: String)
     suspend fun renameSubscription(subscriptionId: String, displayName: String)
     suspend fun toggleCollapse(subscriptionId: String)

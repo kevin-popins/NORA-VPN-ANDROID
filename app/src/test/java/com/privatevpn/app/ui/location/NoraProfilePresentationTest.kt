@@ -10,10 +10,19 @@ import org.junit.Test
 class NoraProfilePresentationTest {
     @Test
     fun `imported and reloaded Antarctica presentation leaves identity and transport intact`() {
+        assertPresentationRoundTrip("NORA 🇸🇴 Антарктида 01", "Somalia", "AQ", "NORA 🇦🇶 Антарктида 01")
+    }
+
+    @Test
+    fun `imported and reloaded Bermuda correction leaves identity and transport intact`() {
+        assertPresentationRoundTrip("NORA 🇬🇧 Bermuda Triangle 03", "United Kingdom", "BM", "NORA 🇧🇲 Бермуды 03")
+    }
+
+    private fun assertPresentationRoundTrip(rawName: String, country: String, isoCode: String, displayName: String) {
         val source = """
             {
-              "remarks": "NORA 🇸🇴 Антарктида 01",
-              "Country": "Somalia",
+              "remarks": "$rawName",
+              "Country": "$country",
               "dns": {"servers": ["1.1.1.1"]},
               "inbounds": [],
               "outbounds": [{"protocol": "freedom", "tag": "direct"}]
@@ -38,9 +47,9 @@ class NoraProfilePresentationTest {
         val reloaded = profile.toEntity().toDomain()
 
         listOf(profile, reloaded).forEach {
-            assertEquals("AQ", resolveNoraRegion(it.displayName)?.isoCode)
-            assertEquals("NORA 🇦🇶 Антарктида 01", noraProfileDisplayName(it.displayName))
-            assertEquals("NORA 🇸🇴 Антарктида 01", it.displayName)
+            assertEquals(isoCode, resolveNoraRegion(it.displayName)?.isoCode)
+            assertEquals(displayName, noraProfileDisplayName(it.displayName))
+            assertEquals(rawName, it.displayName)
             assertEquals(source, it.sourceRaw)
             assertEquals(parsed.normalizedJson, it.normalizedJson)
             assertEquals(selectedProfileId, it.id)

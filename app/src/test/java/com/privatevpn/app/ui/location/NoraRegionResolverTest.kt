@@ -144,6 +144,88 @@ class NoraRegionResolverTest {
         )
     }
 
+    @Test
+    fun `Bermuda recognizes explicit Russian English ISO and red flag forms`() {
+        listOf(
+            "NORA Бермуды 01", "Bermuda", "BERMUDAS", "Bermuda Triangle",
+            "Бермудские острова", "БЕРМУДСКИЙ-ТРЕУГОЛЬНИК 2", "NORA BM 01", "BMU",
+            "🇧🇲", "Bermuda03", "Бермуды04", "Бермудский треугольник05"
+        ).forEach { assertRegion("BM", it) }
+        val region = resolveNoraRegion("Bermuda")
+        assertEquals("Бермуды", region?.labelRu)
+        assertEquals("🇧🇲", region?.flag)
+        assertEquals((1..3).map { "bermuda$it" }, region?.backgroundNames)
+    }
+
+    @Test
+    fun `only an explicit Bermuda name repairs misleading flags`() {
+        listOf(
+            "NORA 🇬🇧 Bermuda #03", "🇻🇬 Бермуды", "🇸🇴 Bermuda Triangle",
+            "🇦🇶 Бермудские острова", "🇩🇪 🇳🇱 Бермудский треугольник01"
+        ).forEach { assertRegion("BM", it) }
+        assertRegion("GB", "🇬🇧 Great Britain")
+        assertRegion("SO", "🇸🇴 Somalia")
+        assertRegion("VA", "🇻🇦 Vatican")
+        assertRegion("DE", "🇩🇪 Germany")
+        assertNull(resolveNoraRegion("🇬🇧 BM"))
+        assertNull(resolveNoraRegion("🇬🇧 🇧🇲"))
+        assertRegion("GB", "🇬🇧 NotBermuda")
+        assertRegion("GB", "🇬🇧 BermudaLink")
+        assertRegion("GB", "🇬🇧 БермудыТест")
+        assertNull(resolveNoraRegion("Бермудский"))
+    }
+
+    @Test
+    fun `Bermuda repair preserves explicit country name and ISO conflicts`() {
+        listOf(
+            "🇬🇧 Bermuda Germany", "Бермуды Нидерланды", "Bermuda GB", "BM DE",
+            "Bermuda Somalia", "Бермудские острова Ватикан", "Bermuda Europe",
+            "🇸🇴 Antarctica Bermuda"
+        ).forEach { assertNull(it, resolveNoraRegion(it)) }
+    }
+
+    @Test
+    fun `Bermuda display correction is idempotent and preserves raw name`() {
+        val raw = "NORA 🇬🇧 Bermuda Triangle #03"
+        val display = noraProfileDisplayName(raw)
+        assertEquals("NORA 🇧🇲 Бермуды #03", display)
+        assertEquals(display, noraProfileDisplayName(display))
+        assertEquals("NORA 🇬🇧 Bermuda Triangle #03", raw)
+        assertEquals("NORA 🇧🇲 Бермуды04", noraProfileDisplayName("NORA 🇻🇬 Bermuda04"))
+        assertEquals("🇧🇲 Бермуды #5", noraProfileDisplayName("🇬🇧 Бермудские острова #5"))
+        assertEquals("🇧🇲 Бермуды01", noraProfileDisplayName("🇬🇧 Бермудский-треугольник01"))
+        assertEquals("🇧🇲 Бермуды", noraProfileDisplayName("🇬🇧 🇩🇪 Bermuda"))
+        assertEquals("🇬🇧 Bermuda Germany", noraProfileDisplayName("🇬🇧 Bermuda Germany"))
+        assertEquals("🇬🇧 Great Britain", noraProfileDisplayName("🇬🇧 Great Britain"))
+    }
+
+    @Test
+    fun `Vatican recognizes only explicit Vatican forms and exposes three scenes`() {
+        listOf("Ватикан", "NORA VATICAN 01", "Vatican City", "Holy See", "Святой престол", "VA", "VAT", "🇻🇦")
+            .forEach { assertRegion("VA", it) }
+        val region = resolveNoraRegion("Vatican")
+        assertEquals("Ватикан", region?.labelRu)
+        assertEquals("🇻🇦", region?.flag)
+        assertEquals((1..3).map { "vatican$it" }, region?.backgroundNames)
+        assertRegion("IT", "Rome")
+        assertNull(resolveNoraRegion("Vatican Italy"))
+        assertNull(resolveNoraRegion("VA DE"))
+        assertNull(resolveNoraRegion("VaticanLink"))
+    }
+
+    @Test
+    fun `Europe follows Windows explicit EU label and flag semantics`() {
+        listOf("Europe", "EUROPEAN UNION", "EU", "🇪🇺", "Европа", "Евросоюз", "Европейский союз", "NORA-EU-01")
+            .forEach { assertRegion("EU", it) }
+        val region = resolveNoraRegion("Europe")
+        assertEquals("Европа", region?.labelRu)
+        assertEquals("🇪🇺", region?.flag)
+        assertEquals(emptyList<String>(), region?.backgroundNames)
+        listOf("NEU", "EuropeLink", "European", "euphoria", "Европейский", "Europe Germany", "EU NL")
+            .forEach { assertNull(it, resolveNoraRegion(it)) }
+        assertRegion("DE", "Germany")
+    }
+
     private fun assertRegion(expectedIsoCode: String, profileName: String) {
         assertEquals(expectedIsoCode, resolveNoraRegion(profileName)?.isoCode)
     }

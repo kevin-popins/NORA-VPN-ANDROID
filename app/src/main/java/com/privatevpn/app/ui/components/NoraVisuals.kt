@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Shield
@@ -73,7 +74,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.privatevpn.app.R
-import com.privatevpn.app.ui.openNoraTelegramBot
+import com.privatevpn.app.ui.openNoraPurchaseWebsite
 import com.privatevpn.app.ui.location.resolveNoraRegion
 import com.privatevpn.app.ui.location.noraProfileDisplayName
 import com.privatevpn.app.ui.theme.NoraAmber
@@ -334,7 +335,8 @@ fun NoraActiveServerCard(
     endpoint: String?,
     vpnStatus: VpnConnectionStatus,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    endpointProtected: Boolean = false
 ) {
     val context = LocalContext.current
     val imageIds = remember(profileName) { noraLocationPhotoIds(context, profileName) }
@@ -406,16 +408,29 @@ fun NoraActiveServerCard(
                         overflow = TextOverflow.Ellipsis
                     )
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(onClick = { showEndpoint = !showEndpoint }, modifier = Modifier.size(28.dp)) {
-                            Icon(
-                                imageVector = if (showEndpoint) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                contentDescription = if (showEndpoint) "Скрыть IP" else "Показать IP",
-                                tint = NoraMuted,
-                                modifier = Modifier.size(17.dp)
-                            )
+                        if (endpointProtected) {
+                            Box(modifier = Modifier.size(28.dp), contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Default.Lock,
+                                    contentDescription = "Адрес защищён",
+                                    tint = NoraMuted,
+                                    modifier = Modifier.size(17.dp)
+                                )
+                            }
+                        } else {
+                            IconButton(onClick = { showEndpoint = !showEndpoint }, modifier = Modifier.size(28.dp)) {
+                                Icon(
+                                    imageVector = if (showEndpoint) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                    contentDescription = if (showEndpoint) "Скрыть IP" else "Показать IP",
+                                    tint = NoraMuted,
+                                    modifier = Modifier.size(17.dp)
+                                )
+                            }
                         }
                         Text(
-                            text = if (showEndpoint) {
+                            text = if (endpointProtected) {
+                                endpoint?.takeIf { it.isNotBlank() } ?: "Защищённый сервер"
+                            } else if (showEndpoint) {
                                 endpoint?.takeIf { it.isNotBlank() } ?: "Сервер не выбран"
                             } else {
                                 "••••••••••••••"
@@ -637,12 +652,12 @@ fun NoraWelcomeScene(
             }
             Spacer(Modifier.height(6.dp))
             TextButton(
-                onClick = { openNoraTelegramBot(context) },
+                onClick = { openNoraPurchaseWebsite(context) },
                 modifier = Modifier.fillMaxWidth().height(42.dp),
                 colors = ButtonDefaults.textButtonColors(contentColor = NoraAmber)
             ) {
                 Text(
-                    text = stringResource(R.string.nora_bot_welcome_cta),
+                    text = stringResource(R.string.nora_site_welcome_cta),
                     fontWeight = FontWeight.Medium
                 )
             }

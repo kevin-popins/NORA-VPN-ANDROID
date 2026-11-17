@@ -96,6 +96,12 @@ Base64URL is encoding, not encryption. Do not place reusable credentials in anal
 
 The `noravpn` custom scheme is not domain-verified and can be claimed by another Android application. Do not use the link itself as an authentication mechanism. A future verified HTTPS App Link requires a stable dashboard domain and its `/.well-known/assetlinks.json` association.
 
+## Manual input parity
+
+The Add screen, pasted text, files, Android sharing and cold/warm deep-link activation use the same `ProfileInputParser`. A complete URI may have outer whitespace, a leading BOM, angle brackets, quotes or a Markdown link wrapper. Normalization does not rewrite the token, change path/query case, strip characters inside the URL, or repeatedly percent-decode the payload.
+
+The subscription URL validator is shared by the deep-link parser and subscription storage. Conflicting `url` and `data` aliases are rejected, as are duplicate parameters even when another payload parameter is present. An explicitly declared `profile` deep link cannot import a subscription URL.
+
 ## Android behavior
 
 The link works on a cold start and while NORA VPN is already running. A running app receives the new link through `MainActivity.onNewIntent()`. The payload is then passed to the existing subscription/profile import pipeline; the deep link does not start or stop VPN itself.

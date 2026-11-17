@@ -11,6 +11,7 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.privatevpn.app.profiles.db.PrivateVpnDatabase
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
@@ -27,24 +28,20 @@ class SubscriptionUpdateWorker(
             appContext = applicationContext
         )
 
-        return@withContext runCatching {
-            val results = repository.refreshAllSubscriptions(force = false)
-            val successCount = results.count { it.status != com.privatevpn.app.profiles.model.SubscriptionSyncStatus.ERROR }
-            val errorCount = results.size - successCount
-            Log.i(
-                TAG,
-                "Subscription auto-update finished: total=${results.size}, success=$successCount, error=$errorCount"
-            )
-            if (results.isNotEmpty() && successCount == 0) {
+        try {
+            return@withContext runCatching {
+                val results = repository.refreshAllSubscriptions(force = false)
+                val successCount = results.count { it.status != com.privatevpn.app.profiles.model.SubscriptionSyncStatus.ERROR }
+                val errorCount = results.size - successCount
+                Log.i(TAG, "Subscription auto-update finished: total=${results.size}, success=$successCount, error=$errorCount")
+                if (results.isNotEmpty() && successCount == 0) Result.retry() else Result.success()
+            }.getOrElse { error ->
+                if (error is CancellationException) throw error
+                Log.w(TAG, "Subscription auto-update failed: ${error::class.java.simpleName}")
                 Result.retry()
-            } else {
-                Result.success()
             }
-        }.getOrElse { error ->
-            Log.w(TAG, "Subscription auto-update failed: ${error.message}", error)
-            Result.retry()
-        }.also {
-            runCatching { database.close() }
+        } finally {
+            database.close()
         }
     }
 

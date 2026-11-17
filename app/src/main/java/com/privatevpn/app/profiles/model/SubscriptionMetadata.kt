@@ -66,7 +66,8 @@ data class SubscriptionMetadataPayload(
     val providerMessage: String? = null,
     val clientMode: String? = null,
     val platformHints: List<String> = emptyList(),
-    val diagnostics: SubscriptionSyncDiagnostics? = null
+    val diagnostics: SubscriptionSyncDiagnostics? = null,
+    val clientPolicy: SubscriptionClientPolicy? = null
 ) {
     val resolvedProviderSiteUrl: String?
         get() = providerSiteUrl ?: providerSite
@@ -161,7 +162,16 @@ object SubscriptionMetadataCodec {
                 providerMessage = root.optString(KEY_PROVIDER_MESSAGE).trim().takeIf { it.isNotBlank() },
                 clientMode = root.optString(KEY_CLIENT_MODE).trim().takeIf { it.isNotBlank() },
                 platformHints = root.optStringArray(KEY_PLATFORMS),
-                diagnostics = diagnosticsJson?.toDiagnostics()
+                diagnostics = diagnosticsJson?.toDiagnostics(),
+                clientPolicy = root.optJSONObject("clientPolicy")?.let { policy ->
+                    SubscriptionClientPolicy(
+                        `protected` = policy.optBooleanOrNull("protected"),
+                        publicLabel = policy.opt("publicLabel") as? String,
+                        issuedAtMs = policy.optLongOrNull("issuedAtMs"),
+                        revision = policy.optLongOrNull("revision"),
+                        expiresAtMs = policy.optLongOrNull("expiresAtMs") ?: policy.optLongOrNull("noticeExpiresAtMs")
+                    )
+                }
             )
         }.getOrElse {
             SubscriptionMetadataPayload(providerName = text)
@@ -199,6 +209,15 @@ object SubscriptionMetadataCodec {
             payload.clientMode?.let { putNonBlank(KEY_CLIENT_MODE, it) }
             if (payload.platformHints.isNotEmpty()) put(KEY_PLATFORMS, JSONArray(payload.platformHints))
             payload.diagnostics?.let { put(KEY_DIAGNOSTICS, it.toJson()) }
+            payload.clientPolicy?.let { policy ->
+                put("clientPolicy", JSONObject().apply {
+                    policy.`protected`?.let { put("protected", it) }
+                    policy.publicLabel?.let { put("publicLabel", it) }
+                    policy.issuedAtMs?.let { put("issuedAtMs", it) }
+                    policy.revision?.let { put("revision", it) }
+                    policy.expiresAtMs?.let { put("expiresAtMs", it) }
+                })
+            }
         }.toString()
     }
 
@@ -229,7 +248,8 @@ object SubscriptionMetadataCodec {
         logoHint: String? = null,
         tags: List<String> = emptyList(),
         labelLine: String? = null,
-        providerMessage: String? = null
+        providerMessage: String? = null,
+        clientPolicy: SubscriptionClientPolicy? = null
     ): String? {
         return encode(
             SubscriptionMetadataPayload(
@@ -257,6 +277,7 @@ object SubscriptionMetadataCodec {
                 tags = tags,
                 labelLine = labelLine,
                 providerMessage = providerMessage,
+                clientPolicy = clientPolicy,
                 clientMode = clientMode,
                 platformHints = platformHints,
                 diagnostics = diagnostics
@@ -291,7 +312,7 @@ object SubscriptionMetadataCodec {
             payload.providerMessage.isNullOrBlank() &&
             payload.clientMode.isNullOrBlank() &&
             payload.platformHints.isEmpty() &&
-            payload.diagnostics == null
+            payload.diagnostics == null && payload.clientPolicy == null
     }
 
     private fun SubscriptionSyncDiagnostics.toJson(): JSONObject {

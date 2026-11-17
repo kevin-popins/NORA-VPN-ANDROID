@@ -29,6 +29,14 @@ private val combiningMarks = Regex("\\p{M}+")
 // name is short; uppercase forms such as "NORA AT 1" remain supported.
 private val ambiguousWordIsoCodes = setOf("at", "be", "in", "it", "no", "so")
 private val antarcticaNames = setOf("antarctica", "антарктида")
+private val bermudaNames = setOf("bermuda", "bermudas", "бермуды", "бермудские острова", "бермудский треугольник")
+private val countryFlagPattern = Regex("[\\x{1F1E6}-\\x{1F1FF}]{2}")
+private val bermudaDisplayNamePattern = Regex(
+    "(?<![\\p{L}\\p{N}])(?:bermuda[\\p{Z}\\s\\p{P}]+triangle|bermudas?|" +
+        "бермудские[\\p{Z}\\s\\p{P}]+острова|бермудский[\\p{Z}\\s\\p{P}]+треугольник|бермуды)" +
+        "(\\p{Nd}*)(?![\\p{L}\\p{N}])",
+    RegexOption.IGNORE_CASE
+)
 
 private fun region(
     isoCode: String,
@@ -48,6 +56,9 @@ private fun region(
 private val regionDefinitions = listOf(
     region("AQ", "Антарктида", "🇦🇶", setOf("aq", "ata"), antarcticaNames, backgroundNames = listOf("antarctica1", "antarctica2", "antarctica3", "antarctica4", "antarctica5")),
     region("SO", "Сомали", "🇸🇴", setOf("so", "som"), setOf("somalia", "сомали")),
+    region("BM", "Бермуды", "🇧🇲", setOf("bm", "bmu"), bermudaNames, backgroundNames = listOf("bermuda1", "bermuda2", "bermuda3")),
+    region("VA", "Ватикан", "🇻🇦", setOf("va", "vat"), setOf("vatican", "vatican city", "holy see", "ватикан", "святой престол"), backgroundNames = listOf("vatican1", "vatican2", "vatican3")),
+    region("EU", "Европа", "🇪🇺", setOf("eu"), setOf("europe", "european union", "европа", "евросоюз", "европейский союз")),
     region("NL", "Нидерланды", "🇳🇱", setOf("nl", "nld", "нл"), setOf("netherlands", "nederland", "dutch", "holland", "голландия", "amsterdam", "амстердам", "rotterdam", "роттердам"), setOf("нидерланд"), listOf("netherlands1", "netherlands2", "netherlands3")),
     region("DE", "Германия", "🇩🇪", setOf("de", "deu", "ger"), setOf("germany", "deutschland", "германия", "berlin", "берлин", "frankfurt", "франкфурт", "munich", "münchen", "мюнхен", "dusseldorf", "düsseldorf", "дюссельдорф"), setOf("герман"), listOf("germany1", "germany2", "germany3")),
     region("RU", "Россия", "🇷🇺", setOf("ru", "rus", "рф"), setOf("russia", "россия", "moscow", "москва", "spb", "питер", "петербург", "saint petersburg", "санкт петербург"), setOf("росси"), listOf("russia1", "russia2", "russia3")),
@@ -102,14 +113,18 @@ internal fun resolveNoraRegion(profileName: String): NoraRegion? {
     val tokens = tokenize(profileName)
     val normalizedTokenValues = tokens.map(NameToken::normalized)
     val explicitlyAntarctica = normalizedTokenValues.any(::isAntarcticaName)
+    val explicitlyBermuda = hasBermudaName(normalizedTokenValues)
 
     // The public Antarctica subscription deliberately carries the Somalia flag
     // for Happ compatibility. Only an explicit Antarctica name overrides SO;
     // all other country conflicts keep the normal ambiguous-region behavior.
+    // An explicit Bermuda name likewise repairs misleading source flags, but
+    // never overrides a different country identified by name or ISO token.
     return regionDefinitions
         .filter { definition ->
             (definition.region.isoCode == "AQ" && explicitlyAntarctica) ||
-                definition.matches(profileName, tokens, normalizedTokenValues)
+                (definition.region.isoCode == "BM" && explicitlyBermuda) ||
+                definition.matches(profileName, tokens, normalizedTokenValues, matchFlag = !explicitlyBermuda)
         }
         .filterNot { explicitlyAntarctica && it.region.isoCode == "SO" }
         .map(RegionDefinition::region)
@@ -120,6 +135,7 @@ internal fun resolveNoraRegion(profileName: String): NoraRegion? {
 /** Presentation only: never write this value back to a profile or transport. */
 internal fun noraProfileDisplayName(profileName: String): String {
     val region = resolveNoraRegion(profileName)
+    if (region?.isoCode == "BM") return bermudaProfileDisplayName(profileName, region)
     if (region?.isoCode != "AQ") return profileName
 
     var removedCompatibilityName = false
@@ -137,15 +153,38 @@ internal fun noraProfileDisplayName(profileName: String): String {
     return if (removedCompatibilityName) displayName.replace(Regex("[\\p{Z}\\s]+"), " ").trim() else displayName
 }
 
+private fun bermudaProfileDisplayName(profileName: String, region: NoraRegion): String {
+    var foundFlag = false
+    var removedDuplicateFlag = false
+    val correctedFlags = countryFlagPattern.replace(profileName) {
+        if (!foundFlag) {
+            foundFlag = true
+            region.flag
+        } else {
+            removedDuplicateFlag = true
+            ""
+        }
+    }
+    val displayName = bermudaDisplayNamePattern.replace(correctedFlags) { match ->
+        region.labelRu + match.groupValues[1]
+    }
+    return if (removedDuplicateFlag) displayName.replace(Regex("[\\p{Z}\\s]+"), " ").trim() else displayName
+}
+
+private fun hasBermudaName(tokens: List<String>): Boolean = bermudaNames.any { alias ->
+    containsSequence(tokens.map { it.trimEnd(Char::isDigit) }, tokenize(alias).map(NameToken::normalized))
+}
+
 private fun isAntarcticaName(token: String): Boolean =
     token.trimEnd(Char::isDigit) in antarcticaNames
 
 private fun RegionDefinition.matches(
     profileName: String,
     tokens: List<NameToken>,
-    normalizedTokenValues: List<String>
+    normalizedTokenValues: List<String>,
+    matchFlag: Boolean = true
 ): Boolean {
-    if (profileName.contains(region.flag)) return true
+    if (matchFlag && profileName.contains(region.flag)) return true
 
     val isoMatch = isoCodes.any { code ->
         val normalizedCode = normalizeToken(code)

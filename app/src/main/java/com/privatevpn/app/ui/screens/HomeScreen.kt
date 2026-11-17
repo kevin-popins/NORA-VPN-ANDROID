@@ -62,6 +62,8 @@ import com.privatevpn.app.R
 import com.privatevpn.app.profiles.model.SubscriptionMetadataCodec
 import com.privatevpn.app.profiles.model.SubscriptionSource
 import com.privatevpn.app.profiles.model.SubscriptionSyncStatus
+import com.privatevpn.app.profiles.model.userFacingName
+import com.privatevpn.app.profiles.model.SubscriptionPresentation
 import com.privatevpn.app.profiles.model.VpnProfile
 import com.privatevpn.app.ui.components.AppSection
 import com.privatevpn.app.ui.components.InlineStatusLabel
@@ -139,6 +141,7 @@ fun HomeScreen(
         "00:00:00"
     }
 
+    val activeProfile = profiles.firstOrNull { it.id == activeProfileId }
     val primaryButtonLabel = when (vpnStatus) {
         VpnConnectionStatus.NO_PERMISSION -> "Разрешить VPN"
         VpnConnectionStatus.CONNECTED -> "Подключено"
@@ -171,7 +174,8 @@ fun HomeScreen(
             protocolLabel = protocolLabel,
             endpoint = serverAddress,
             vpnStatus = vpnStatus,
-            onClick = onOpenProfiles
+            onClick = onOpenProfiles,
+            endpointProtected = activeProfile?.endpointProtectionEnabled == true
         )
         NoraChangeServerCard(onClick = onOpenProfiles)
         if (!connectionErrorMessage.isNullOrBlank()) {
@@ -203,7 +207,8 @@ fun HomeScreen(
                     protocolLabel = protocolLabel,
                     endpoint = serverAddress,
                     vpnStatus = vpnStatus,
-                    onClick = onOpenProfiles
+                    onClick = onOpenProfiles,
+                    endpointProtected = activeProfile?.endpointProtectionEnabled == true
                 )
                 NoraTrafficWaitingPanel(
                     traffic = traffic,
@@ -267,7 +272,7 @@ fun HomeScreen(
                     key = { profile -> profile.id }
                 ) { profile ->
                     CompactServerRow(
-                        title = noraProfileDisplayName(profile.displayName),
+                        title = noraProfileDisplayName(profile.userFacingName),
                         selected = profile.id == activeProfileId,
                         pingText = serverPingResults[profile.id],
                         onClick = { onSetActiveProfile(profile.id) }
@@ -327,11 +332,11 @@ private fun SubscriptionGroup(
     val context = LocalContext.current
     var menuExpanded by rememberSaveable(source.id) { mutableStateOf(false) }
     val metadata = remember(source.metadata) { SubscriptionMetadataCodec.decode(source.metadata) }
-    val title = metadata.displayTitle ?: source.displayName
-    val providerLabel = metadata.providerName
+    val title = if (metadata.clientPolicy?.endpointProtectionEnabled == true) SubscriptionPresentation.sourceTitle(source) else metadata.displayTitle ?: source.displayName
+    val providerLabel = if (metadata.clientPolicy?.endpointProtectionEnabled == true) null else metadata.providerName
         ?: metadata.resolvedProviderDomain
         ?: metadata.resolvedProviderSiteUrl?.let { runCatching { URL(it).host.removePrefix("www.") }.getOrNull() }
-    val providerLink = metadata.preferredExternalUrl()
+    val providerLink = if (metadata.clientPolicy?.endpointProtectionEnabled == true) null else metadata.preferredExternalUrl()
     val trafficSummary = remember(metadata) { formatSubscriptionTraffic(metadata) }
     val expireSummary = remember(metadata) { formatSubscriptionExpiry(metadata) }
     val providerDomainLine = providerLabel
@@ -342,7 +347,7 @@ private fun SubscriptionGroup(
     }
     val resolvedUserId = metadata.userId ?: legacyLabelTokens.userId
     val resolvedPlanId = metadata.planId ?: legacyLabelTokens.planId
-    val providerMetaLine = remember(metadata, providerLink, resolvedUserId, resolvedPlanId) {
+    val providerMetaLine = if (metadata.clientPolicy?.endpointProtectionEnabled == true) null else remember(metadata, providerLink, resolvedUserId, resolvedPlanId) {
         buildList {
             metadata.resolvedProviderSiteUrl
                 ?.trim()
@@ -355,7 +360,7 @@ private fun SubscriptionGroup(
             resolvedPlanId?.trim()?.takeIf { it.isNotBlank() }?.let { add("#$it") }
         }.joinToString(" • ").takeIf { it.isNotBlank() }
     }
-    val legendLine = buildLegendLine(
+    val legendLine = if (metadata.clientPolicy?.endpointProtectionEnabled == true) null else buildLegendLine(
         labelLine = metadata.labelLine,
         tags = metadata.tags,
         fallbackCandidates = listOf(
@@ -559,7 +564,7 @@ private fun SubscriptionGroup(
                     } else {
                         profiles.forEach { profile ->
                             CompactServerRow(
-                                title = noraProfileDisplayName(profile.displayName),
+                                title = noraProfileDisplayName(profile.userFacingName),
                                 selected = profile.id == activeProfileId,
                                 pingText = serverPingResults[profile.id],
                                 onClick = { onSelectProfile(profile.id) }

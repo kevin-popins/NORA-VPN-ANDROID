@@ -17,6 +17,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -61,6 +62,10 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import com.privatevpn.app.ui.qr.QrScannerScreen
+import com.privatevpn.app.ui.qr.rememberAddImportDraftState
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -73,6 +78,7 @@ import androidx.navigation.compose.rememberNavController
 import com.privatevpn.app.R
 import com.privatevpn.app.core.log.LogLevel
 import com.privatevpn.app.navigation.AppDestination
+import com.privatevpn.app.profiles.model.userFacingName
 import com.privatevpn.app.profiles.model.ProfileType
 import com.privatevpn.app.settings.SettingsState
 import com.privatevpn.app.ui.screens.DnsScreen
@@ -120,6 +126,10 @@ fun PrivateVpnApp(
     var settingsReselectSignal by remember { mutableIntStateOf(0) }
     var settingsSocksFocusSignal by remember { mutableIntStateOf(0) }
     var showNotificationOnboarding by remember { mutableStateOf(false) }
+    var showQrScanner by remember { mutableStateOf(false) }
+    val manualAddDraft = rememberAddImportDraftState()
+    val qrImportState by appViewModel.qrImportState.collectAsStateWithLifecycle()
+    var qrScanToken by remember { mutableStateOf<Long?>(null) }
     var addedProfileFocusId by rememberSaveable { mutableStateOf<String?>(null) }
     var addedSubscriptionFocusId by rememberSaveable { mutableStateOf<String?>(null) }
 
@@ -199,11 +209,13 @@ fun PrivateVpnApp(
 
     LaunchedEffect(appViewModel) {
         appViewModel.addContentEvents.collect { event ->
+            if (event is AddContentEvent.Success && event.qrSession != null && !appViewModel.isCurrentQrImport(event.qrSession)) return@collect
             focusManager.clearFocus(force = true)
             keyboardController?.hide()
             snackbarHostState.currentSnackbarData?.dismiss()
             when (event) {
                 is AddContentEvent.Success -> {
+                    if (event.clearManualDraft) manualAddDraft.text = ""
                     when (val target = event.target) {
                         is AddedServerTarget.Profile -> {
                             addedProfileFocusId = target.id
@@ -249,6 +261,32 @@ fun PrivateVpnApp(
         appViewModel.importExternalIntent(intent)
         onExternalImportIntentConsumed()
         navigateToTopLevel(AppDestination.Profiles)
+    }
+
+    if (showQrScanner) {
+        Dialog(
+            onDismissRequest = {
+                qrScanToken?.let(appViewModel::closeQrScan)
+                qrScanToken = null
+                showQrScanner = false
+            },
+            properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
+        ) {
+            Surface(modifier = Modifier.fillMaxSize(), color = NoraInk, contentColor = MaterialTheme.colorScheme.onBackground) {
+            QrScannerScreen(
+                onDecoded = { payload ->
+                    qrScanToken?.let { appViewModel.importScannedQr(it, payload) }
+                    qrScanToken = null
+                    showQrScanner = false
+                },
+                onClose = {
+                    qrScanToken?.let(appViewModel::closeQrScan)
+                    qrScanToken = null
+                    showQrScanner = false
+                }
+            )
+            }
+        }
     }
 
     Scaffold(
@@ -332,7 +370,7 @@ fun PrivateVpnApp(
                     traffic = uiState.traffic,
                     profilesLoaded = uiState.profilesLoaded,
                     connectionErrorMessage = uiState.connectionError,
-                    activeProfileName = uiState.activeProfile?.displayName,
+                    activeProfileName = uiState.activeProfile?.userFacingName,
                     protocolLabel = profileTypeLabel(uiState.activeProfile?.type),
                     serverAddress = uiState.activeProfileServer,
                     profiles = uiState.profiles,
@@ -408,9 +446,20 @@ fun PrivateVpnApp(
 
             composable(AppDestination.Add.route) {
                 AddScreen(
+                    value = manualAddDraft.text,
+                    onValueChange = { manualAddDraft.text = it },
+                    qrImportState = qrImportState,
+                    onCancelQrImport = appViewModel::cancelQrImport,
+                    onDismissQrError = appViewModel::dismissQrImportError,
                     onImportProfile = appViewModel::importProfileFromAddScreen,
                     onImportFile = { addProfileFileLauncher.launch(arrayOf("*/*")) },
-                    onAddSubscription = appViewModel::addSubscriptionFromAddScreen
+                    onAddSubscription = appViewModel::addSubscriptionFromAddScreen,
+                    onScanQr = {
+                        focusManager.clearFocus(force = true)
+                        keyboardController?.hide()
+                        qrScanToken = appViewModel.beginQrScan()
+                        showQrScanner = true
+                    }
                 )
             }
 

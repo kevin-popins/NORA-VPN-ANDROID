@@ -1,5 +1,7 @@
 package com.privatevpn.app.profiles.deeplink
 
+import com.privatevpn.app.profiles.importer.ImportInputNormalizer
+import com.privatevpn.app.profiles.subscriptions.SubscriptionUrlValidator
 import java.io.ByteArrayOutputStream
 import java.net.URI
 import java.nio.ByteBuffer
@@ -28,14 +30,14 @@ object NoraDeepLinkParser {
 
     fun isNoraDeepLink(rawUri: String?): Boolean {
         if (rawUri.isNullOrBlank() || rawUri.length > MAX_LINK_CHARS) return false
-        return NORA_LINK_PREFIX.containsMatchIn(rawUri)
+        return NORA_LINK_PREFIX.containsMatchIn(ImportInputNormalizer.normalize(rawUri))
     }
 
     fun parse(rawUri: String): NoraDeepLinkImport {
         require(rawUri.isNotBlank()) { "Deep link is empty" }
         require(rawUri.length <= MAX_LINK_CHARS) { "Deep link is too large" }
 
-        val uri = runCatching { URI(rawUri) }
+        val uri = runCatching { URI(ImportInputNormalizer.normalize(rawUri)) }
             .getOrElse { throw IllegalArgumentException("Malformed deep link URI", it) }
 
         require(uri.scheme.equals(SCHEME, ignoreCase = true)) { "Unsupported deep link scheme" }
@@ -54,6 +56,8 @@ object NoraDeepLinkParser {
         }
 
         val query = parseQuery(uri.rawQuery)
+        require(query.values.all { it.size == 1 }) { "Deep link parameter is duplicated" }
+        require(!(URL_PARAM in query && DATA_PARAM in query)) { "Conflicting payload parameters" }
         val allowedKeys = when (importType) {
             SUBSCRIPTION_PATH -> setOf(VERSION_PARAM, URL_PARAM, DATA_PARAM, PAYLOAD_PARAM, NAME_PARAM)
             else -> setOf(VERSION_PARAM, DATA_PARAM, PAYLOAD_PARAM)
@@ -86,7 +90,7 @@ object NoraDeepLinkParser {
 
         return when (importType) {
             SUBSCRIPTION_PATH -> NoraDeepLinkImport.Subscription(
-                url = validateSubscriptionUrl(payload),
+                url = SubscriptionUrlValidator.validate(payload),
                 displayName = query.singleValue(NAME_PARAM)
                     ?.let { validateDecodedText(it.trim(), MAX_DISPLAY_NAME_BYTES) }
                     ?.takeIf { it.isNotEmpty() }
@@ -94,19 +98,6 @@ object NoraDeepLinkParser {
 
             else -> NoraDeepLinkImport.Profile(payload)
         }
-    }
-
-    private fun validateSubscriptionUrl(value: String): String {
-        val uri = runCatching { URI(value) }
-            .getOrElse { throw IllegalArgumentException("Malformed subscription URL", it) }
-        require(uri.scheme.equals("https", ignoreCase = true) || uri.scheme.equals("http", ignoreCase = true)) {
-            "Subscription URL must use HTTP or HTTPS"
-        }
-        require(!uri.host.isNullOrBlank()) { "Subscription URL must contain a host" }
-        require(uri.port == -1 || uri.port in 1..65535) { "Subscription URL port is invalid" }
-        require(uri.rawUserInfo == null) { "Subscription URL user info is not allowed" }
-        require(uri.rawFragment == null) { "Subscription URL fragment is not allowed" }
-        return value
     }
 
     private fun parseQuery(rawQuery: String?): Map<String, List<String>> {
