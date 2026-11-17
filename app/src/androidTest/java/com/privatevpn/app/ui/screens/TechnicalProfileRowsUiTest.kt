@@ -107,4 +107,36 @@ class TechnicalProfileRowsUiTest {
         rule.onNodeWithText(exactTechnicalTitle).performScrollTo().assertExists()
         rule.onNode(SemanticsMatcher.expectValue(SemanticsProperties.Role,Role.RadioButton)).assertIsNotSelected().assertIsNotEnabled()
     }
+    @Test fun protectedSafeAnnounceUsesExistingExpandedSubscriptionDescription() {
+        val instruction = "Нажмите 🔄 и поменяйте сервер если не работает."
+        val real = profile()
+        val source = source(listOf(real)).copy(metadata = SubscriptionMetadataCodec.encode(SubscriptionMetadataPayload(
+            announcementText = instruction, userId = "SYNTHETIC_PRIVATE_ID", providerSite = "https://provider.example.invalid",
+            clientPolicy = SubscriptionClientPolicy(`protected` = true, publicLabel = "NORA private"))))
+        servers(listOf(real), listOf(source))
+        rule.onNodeWithText(instruction).performScrollTo().assertExists()
+        rule.onNodeWithText("SYNTHETIC_PRIVATE_ID", substring = true).assertDoesNotExist()
+        rule.onNodeWithText("provider.example.invalid", substring = true).assertDoesNotExist()
+        rule.onNodeWithText("Наш сайт", substring = true).assertDoesNotExist()
+    }
+
+    @Test fun collapsedProtectedSubscriptionKeepsSafeAnnouncementHidden() {
+        val instruction = "Нажмите 🔄 и поменяйте сервер если не работает."
+        val real = profile()
+        val source = source(listOf(real)).copy(isCollapsed = true, metadata = SubscriptionMetadataCodec.encode(
+            SubscriptionMetadataPayload(announcementText = instruction,
+                clientPolicy = SubscriptionClientPolicy(`protected` = true, publicLabel = "NORA private"))))
+        servers(listOf(real), listOf(source))
+        rule.onNodeWithText(instruction).assertDoesNotExist()
+    }
+
+    @Test fun protectedUnsafeAnnounceNeverReopensTheDescriptionSurface() {
+        val unsafe = "shortId=0123456789abcdef"
+        val real = profile()
+        val source = source(listOf(real)).copy(metadata = SubscriptionMetadataCodec.encode(
+            SubscriptionMetadataPayload(announcementText = unsafe,
+                clientPolicy = SubscriptionClientPolicy(`protected` = true, publicLabel = "NORA private"))))
+        servers(listOf(real), listOf(source))
+        rule.onNodeWithText(unsafe).assertDoesNotExist()
+    }
 }

@@ -597,7 +597,9 @@ private fun SubscriptionCard(
                 ?.let { add(it) }
         }.joinToString(" • ").takeIf { it.isNotBlank() }
     }
-    val legendLine = if (metadata.clientPolicy?.endpointProtectionEnabled == true) null else buildSubscriptionLegendLine(
+    val legendLine = if (metadata.clientPolicy?.endpointProtectionEnabled == true) {
+        remember(source, profiles) { SubscriptionPresentation.protectedAnnouncement(source, profiles) }
+    } else buildSubscriptionLegendLine(
         labelLine = metadata.labelLine,
         tags = metadata.tags,
         fallbackCandidates = listOf(

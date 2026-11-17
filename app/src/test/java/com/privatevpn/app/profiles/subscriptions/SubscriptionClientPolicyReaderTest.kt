@@ -39,6 +39,13 @@ class SubscriptionClientPolicyReaderTest {
         assertNull(read(changed { it.getJSONObject("display").put("public_label", JSONObject.NULL) })?.publicLabel)
         assertEquals("null", read(changed { it.getJSONObject("display").put("public_label", "null") })?.publicLabel)
     }
+    @Test fun `Russian public label with refresh emoji is decoded literally and is separate from Announce`() {
+        val label = "Нажмите 🔄 и поменяйте сервер если не работает."
+        val policy = read(changed { it.getJSONObject("display").put("public_label", label) })!!
+        assertEquals(label, policy.publicLabel)
+        assertEquals(label, policy.publicDisplayLabel)
+        assertTrue(SubscriptionClientPolicyReader.canAdopt(null, policy))
+    }
     @Test fun `absent malformed duplicate and canceled protocol data cannot clear protection`() {
         val current = read()!!
         for (headers in listOf(emptyList(), listOf("bad+base64"), listOf(encode(envelope), encode(envelope)), listOf(encode(envelope) + ", " + encode(envelope)))) {
