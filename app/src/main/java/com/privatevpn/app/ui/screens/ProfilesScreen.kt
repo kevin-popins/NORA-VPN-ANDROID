@@ -134,6 +134,7 @@ fun ProfilesScreen(
     onClearError: () -> Unit,
     onTransientMessage: (String) -> Unit
 ) {
+    val context = LocalContext.current
     val listState = rememberLazyListState()
     val regularProfiles = remember(profiles) { profiles.filter { it.parentSubscriptionId == null } }
     val childrenBySubscription = remember(profiles) {
@@ -289,7 +290,10 @@ fun ProfilesScreen(
                     refreshing = refreshingSubscriptionIds.contains(source.id),
                     onToggleCollapse = { onToggleSubscriptionCollapse(source.id) },
                     onRefresh = { onRefreshSubscription(source.id) },
-                    onShowInfo = { subscriptionDetails = source },
+                    onShowInfo = {
+                        val informationUrl = SubscriptionPresentation.informationUrl(source)
+                        if (informationUrl == null || !openExternalLink(context, informationUrl)) subscriptionDetails = source
+                    },
                     onRename = { renameSubscription = source },
                     onDelete = { deleteSubscription = source },
                     onToggleEnabled = { onSetSubscriptionEnabled(source.id, it) },
@@ -571,8 +575,8 @@ private fun SubscriptionCard(
     val context = LocalContext.current
     var menuExpanded by remember { mutableStateOf(false) }
     val metadata = remember(source.metadata) { SubscriptionMetadataCodec.decode(source.metadata) }
-    val title = if (metadata.clientPolicy?.endpointProtectionEnabled == true) SubscriptionPresentation.sourceTitle(source) else metadata.displayTitle ?: source.displayName
-    val providerLink = if (metadata.clientPolicy?.endpointProtectionEnabled == true) null else metadata.preferredExternalUrl()
+    val title = SubscriptionPresentation.sourceTitle(source)
+    val providerLink = SubscriptionPresentation.informationUrl(source)
     val expirySummary = remember(metadata) { formatSubscriptionExpiryLine(metadata) }
     val serversLine = stringResource(
         R.string.profiles_subscription_servers_count,

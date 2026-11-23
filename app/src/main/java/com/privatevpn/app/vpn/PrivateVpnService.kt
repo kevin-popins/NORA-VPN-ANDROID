@@ -4,6 +4,9 @@ import com.privatevpn.app.ui.location.noraProfileDisplayName
 
 import com.privatevpn.app.profiles.db.PrivateVpnDatabase
 import com.privatevpn.app.profiles.model.SubscriptionMetadataCodec
+import com.privatevpn.app.profiles.model.SubscriptionPresentation
+import com.privatevpn.app.profiles.model.userFacingName
+import com.privatevpn.app.profiles.repository.toDomain
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.collect
@@ -69,7 +72,6 @@ class PrivateVpnService : VpnService() {
     @Volatile
     private var connectInProgress = false
     private val protectionScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var protectedNotificationLabel: String? = null
 
     @Volatile
     private var currentProfileName: String? = null
@@ -127,7 +129,7 @@ class PrivateVpnService : VpnService() {
             }
 
             ACTION_UPDATE_NOTIFICATION_PROFILE -> {
-                currentProfileName = protectedNotificationLabel ?: intent.getStringExtra(EXTRA_PROFILE_NAME)
+                currentProfileName = intent.getStringExtra(EXTRA_PROFILE_NAME)
                     ?.trim()
                     ?.takeIf { it.isNotBlank() }
                 VpnRuntimeStateStore.setLastSelectedProfileName(currentProfileName)
@@ -179,13 +181,15 @@ class PrivateVpnService : VpnService() {
         // Resolve accepted policy before any diagnostic payload can be captured, including tile starts.
         val protectionDb = protectionDatabase ?: PrivateVpnDatabase.build(applicationContext).also { protectionDatabase = it }
         val acceptedSource = runCatching {
-            val parent = protectionDb.profileDao().findById(profileId)?.parentSubscriptionId
-            parent to parent?.let { protectionDb.subscriptionSourceDao().findById(it) }?.metadata
-                ?.let { SubscriptionMetadataCodec.decode(it).clientPolicy }
+            val savedProfile = protectionDb.profileDao().findById(profileId)?.toDomain()
+            val parent = savedProfile?.parentSubscriptionId
+            val source = parent?.let { protectionDb.subscriptionSourceDao().findById(it) }?.toDomain()
+            Triple(parent, SubscriptionPresentation.policy(source), savedProfile?.let {
+                SubscriptionPresentation.apply(it, listOfNotNull(source)).userFacingName
+            })
         }
         val acceptedPolicy = acceptedSource.getOrNull()?.second
         endpointProtectionEnabled = if (acceptedSource.isFailure) true else acceptedPolicy?.`protected` ?: protectEndpoints
-        protectedNotificationLabel = if (endpointProtectionEnabled) acceptedPolicy?.publicDisplayLabel ?: "Защищённый сервер" else null
         if (runtimeConfig.isBlank()) {
             failWithError(
                 AppErrors.genericUiStateError(
@@ -234,7 +238,7 @@ class PrivateVpnService : VpnService() {
         handlingFailure = false
         clearRuntimeLog()
         observeEndpointProtection(acceptedSource.getOrNull()?.first, profileId, runtimeToken)
-        currentProfileName = protectedNotificationLabel ?: profileName
+        currentProfileName = acceptedSource.getOrNull()?.third ?: profileName
         VpnRuntimeStateStore.setLastSelectedProfileName(currentProfileName)
         VpnRuntimeStateStore.setStatusForOwner(runtimeToken, VpnConnectionStatus.CONNECTING)
         VpnQuickSettingsTileService.requestTileStateRefresh(this)
@@ -271,6 +275,11 @@ class PrivateVpnService : VpnService() {
                     runtimeToken = runtimeToken
                 )
 
+                val packetPolicy = SplitTunnelGuardFactory.create(
+                    this@PrivateVpnService, privateSessionPolicy.enabled,
+                    privateSessionPolicy.trustedPackages, dnsServers
+                )
+
                 val tun = establishTunInterface(
                     requestedDns = dnsServers,
                     privateSessionPolicy = privateSessionPolicy
@@ -283,7 +292,18 @@ class PrivateVpnService : VpnService() {
                     socksUsername = dataPlane.socksUsername,
                     socksPassword = dataPlane.socksPassword,
                     tunFd = tun.fd,
-                    mtu = DEFAULT_MTU
+                    mtu = DEFAULT_MTU,
+                    packetPolicy = packetPolicy,
+                    onFailure = { error ->
+                        serviceScope.launch {
+                            failWithError(
+                                AppErrors.xrayRuntimeStartFailed(
+                                    technicalReason = error.message ?: "Защита входящего трафика остановлена"
+                                ),
+                                runtimeToken
+                            )
+                        }
+                    }
                 ).getOrThrow()
 
                 if (!VpnRuntimeStateStore.isRuntimeOwner(runtimeToken)) {
@@ -516,26 +536,18 @@ class PrivateVpnService : VpnService() {
             // A running tunnel keeps its subscription identity even when refresh replaces child IDs.
             database.subscriptionSourceDao().observeAll().collect { sources ->
                 if (activeRuntimeToken != runtimeToken) return@collect
-                val policy = sources.firstOrNull { it.id == parent }?.metadata?.let { SubscriptionMetadataCodec.decode(it).clientPolicy }
-                // Missing metadata cannot remove a restriction already accepted for this runtime.
-                policy?.`protected`?.let { enabled ->
-                    endpointProtectionEnabled = enabled
-                    if (!enabled) {
-                        protectedNotificationLabel = null
-                        currentProfileName = database.profileDao().findById(profileId)?.displayName ?: currentProfileName
-                        VpnRuntimeStateStore.setLastSelectedProfileName(currentProfileName)
-                        updateForegroundNotification()
+                val source = sources.firstOrNull { it.id == parent }?.toDomain()
+                val policy = SubscriptionPresentation.policy(source)
+                // Protection is sticky; its public address label is never a profile title.
+                policy?.`protected`?.let { endpointProtectionEnabled = it }
+                if (endpointProtectionEnabled) clearRuntimeLog()
+                if (policy != null) {
+                    database.profileDao().findById(profileId)?.toDomain()?.let { profile ->
+                        currentProfileName = SubscriptionPresentation.apply(profile, listOfNotNull(source)).userFacingName
                     }
                 }
-                if (endpointProtectionEnabled) {
-                    clearRuntimeLog()
-                    policy?.let {
-                        protectedNotificationLabel = it.publicDisplayLabel
-                        currentProfileName = it.publicDisplayLabel
-                        VpnRuntimeStateStore.setLastSelectedProfileName(currentProfileName)
-                        updateForegroundNotification()
-                    }
-                }
+                VpnRuntimeStateStore.setLastSelectedProfileName(currentProfileName)
+                updateForegroundNotification()
             }
         }
     }
@@ -565,6 +577,8 @@ class PrivateVpnService : VpnService() {
     }
 
     private fun failWithError(appError: AppError, runtimeToken: String? = activeRuntimeToken) {
+        if (runtimeToken != null &&
+            (runtimeToken != activeRuntimeToken || !VpnRuntimeStateStore.isRuntimeOwner(runtimeToken))) return
         if (handlingFailure) return
         handlingFailure = true
 

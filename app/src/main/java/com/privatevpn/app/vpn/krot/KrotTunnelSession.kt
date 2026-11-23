@@ -1,6 +1,7 @@
 package com.privatevpn.app.vpn.krot
 
 import android.os.ParcelFileDescriptor
+import com.privatevpn.app.vpn.dataplane.TunPacketPolicy
 import com.privatevpn.app.core.backend.krot.KrotConnectionSpec
 import com.privatevpn.app.core.backend.krot.KrotFrameType
 import com.privatevpn.app.core.backend.krot.KrotProtocol
@@ -28,7 +29,8 @@ class KrotTunnelSession(
     private val protectSocket: (Socket) -> Boolean,
     private val isNetworkAvailable: () -> Boolean,
     private val log: (String) -> Unit,
-    private val onFailure: (Throwable) -> Unit
+    private val onFailure: (Throwable) -> Unit,
+    private val packetPolicy: TunPacketPolicy? = null
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val stopped = AtomicBoolean(true)
@@ -116,6 +118,7 @@ class KrotTunnelSession(
                     val len = input.read(buffer)
                     if (len < 0) break
                     if (len == 0) continue
+                    if (packetPolicy?.allowsPacket(buffer, len) == false) continue
                     val packet = buffer.copyOf(len)
                     val readCount = tunReadPackets.incrementAndGet()
                     tunReadBytes.addAndGet(packet.size.toLong())

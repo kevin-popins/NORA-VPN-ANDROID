@@ -29,10 +29,64 @@ class SubscriptionPresentationTest {
         assertFalse(SubscriptionPresentation.apply(profile("b"), sources).endpointProtectionEnabled)
         assertFalse(SubscriptionPresentation.apply(profile(null), sources).endpointProtectionEnabled)
     }
-    @Test fun endpointAndParentSourceNamesNeverBecomePublicTitles() {
+    @Test fun endpointAndParentSourceNamesUseNeutralTitlesInsteadOfTheAddressLabel() {
         val sources = listOf(source("a", true))
-        assertEquals("NORA private", SubscriptionPresentation.apply(profile(name="proxy.example.invalid"), sources).userFacingName)
-        assertEquals("NORA private", SubscriptionPresentation.apply(profile(name="subs.example.invalid/synthetic-token"), sources).userFacingName)
+        assertEquals("Сервер", SubscriptionPresentation.apply(profile(name="proxy.example.invalid"), sources).userFacingName)
+        assertEquals("Сервер", SubscriptionPresentation.apply(profile(name="subs.example.invalid/synthetic-token"), sources).userFacingName)
+        assertEquals("NORA private", SubscriptionPresentation.apply(profile(name="proxy.example.invalid"), sources).protectedPublicLabel)
+    }
+    @Test fun providerFriendlyTitleHasPriorityAndCustomLabelOnlyChangesTheAddressSlot() {
+        val source = source("a", true, "Custom address label").copy(
+            displayName = "https://subs.example.invalid/synthetic-token",
+            metadata = SubscriptionMetadataCodec.encode(SubscriptionMetadataPayload(
+                displayTitle = "NORA friendly subscription",
+                clientPolicy = SubscriptionClientPolicy(`protected` = true, publicLabel = "Custom address label"))))
+        val profile = profile(name = "NORA 🇳🇱 Нидерланды 01")
+        val presented = SubscriptionPresentation.apply(profile, listOf(source))
+        assertEquals("NORA friendly subscription", SubscriptionPresentation.sourceTitle(source))
+        assertEquals(profile.displayName, presented.userFacingName)
+        assertEquals("Custom address label", presented.protectedPublicLabel)
+        assertEquals("https://subs.example.invalid/synthetic-token", source.displayName)
+        assertEquals(profile.sourceRaw, presented.sourceRaw)
+    }
+    @Test fun sourceTitleUsesFriendlyFallbackOrNeutralTitleWithoutCustomAddressText() {
+        val base = source("a", true, "Custom address label")
+        assertEquals("Subscription", SubscriptionPresentation.sourceTitle(base))
+        assertEquals("Подписка", SubscriptionPresentation.sourceTitle(base.copy(displayName = base.sourceUrl)))
+        val unsafeHeader = base.copy(metadata = SubscriptionMetadataCodec.encode(SubscriptionMetadataPayload(
+            displayTitle = "subs.example.invalid", clientPolicy = SubscriptionClientPolicy(`protected` = true, publicLabel = "Custom address label"))))
+        assertEquals("Subscription", SubscriptionPresentation.sourceTitle(unsafeHeader))
+        assertEquals("Подписка", SubscriptionPresentation.sourceTitle(unsafeHeader.copy(displayName = base.sourceUrl)))
+    }
+    @Test fun unprotectedSourceTitleKeepsTheExistingProviderTitlePriority() {
+        val source = source("a", false).copy(metadata = SubscriptionMetadataCodec.encode(
+            SubscriptionMetadataPayload(displayTitle = "Provider title")))
+        assertEquals("Provider title", SubscriptionPresentation.sourceTitle(source))
+    }
+    @Test fun informationUsesTheProviderConnectPageBeforeTheSiteWithoutChangingItsUrl() {
+        val connect = "https://connect.example.invalid/sub/synthetic?view=connect#devices"
+        val source = source("a", true).copy(metadata = SubscriptionMetadataCodec.encode(SubscriptionMetadataPayload(
+            profileWebPageUrl = connect, providerSite = "https://provider.example.invalid",
+            clientPolicy = SubscriptionClientPolicy(`protected` = true))))
+        assertEquals(connect, SubscriptionPresentation.informationUrl(source))
+        assertEquals("https://subs.example.invalid/synthetic-token", source.sourceUrl)
+    }
+    @Test fun informationFallsBackOnlyToExplicitHttpProviderMetadata() {
+        val source = source("a", true)
+        assertNull(SubscriptionPresentation.informationUrl(source))
+        val site = "http://provider.example.invalid/account"
+        assertEquals(site, SubscriptionPresentation.informationUrl(source.copy(metadata = SubscriptionMetadataCodec.encode(
+            SubscriptionMetadataPayload(providerSite = site)))))
+        assertEquals(site, SubscriptionPresentation.informationUrl(source.copy(metadata = SubscriptionMetadataCodec.encode(
+            SubscriptionMetadataPayload(profileWebPageUrl = "intent://synthetic", providerSite = site)))))
+    }
+    @Test fun informationRejectsTransportFileJavascriptOpaqueAndCredentialBearingUrls() {
+        val source = source("a", true)
+        for (url in listOf("vless://synthetic@proxy.example.invalid:443", "file:///synthetic", "javascript:synthetic",
+            "https:synthetic", "https:///synthetic", "https://user:pass@provider.example.invalid", "https://provider.example.invalid:0", "https://provider.example.invalid:65536", "https://provider.example.invalid/bad path")) {
+            assertNull(url, SubscriptionPresentation.informationUrl(source.copy(metadata = SubscriptionMetadataCodec.encode(
+                SubscriptionMetadataPayload(profileWebPageUrl = url, providerSite = url)))))
+        }
     }
     @Test fun fullMaterialIsRemovedBeforeShorterHostMatches() {
         val original = profile()

@@ -24,15 +24,32 @@ object SubscriptionPresentation {
             profile.displayName.contains(Regex("(?:https?|vless|vmess|trojan)://", RegexOption.IGNORE_CASE)) ||
             profile.displayName.contains(Regex("""(?:[0-9]{1,3}\.){3}[0-9]{1,3}"""))
         return profile.copy(endpointProtectionEnabled = true, protectedPublicLabel = label,
-            presentationName = if (nameLeaksEndpoint) label else profile.displayName)
+            presentationName = if (nameLeaksEndpoint) "Сервер" else profile.displayName)
     }
 
     fun sourceTitle(source: SubscriptionSource): String {
-        val policy = policy(source)
-        if (policy?.endpointProtectionEnabled != true) return source.displayName
+        val metadata = SubscriptionMetadataCodec.decode(source.metadata)
+        val candidates = listOfNotNull(metadata.displayTitle?.trim()?.takeIf { it.isNotEmpty() }, source.displayName.trim().takeIf { it.isNotEmpty() })
+        if (metadata.clientPolicy?.endpointProtectionEnabled != true) return candidates.firstOrNull() ?: "Подписка"
         val host = runCatching { URI(source.sourceUrl).host }.getOrNull()
-        return if (SubscriptionClientPolicy.containsEndpointText(source.displayName) || (host != null && source.displayName.contains(host, true)))
-            policy.publicDisplayLabel else source.displayName
+        return candidates.firstOrNull { title ->
+            !SubscriptionClientPolicy.containsEndpointText(title) &&
+                (host == null || !title.contains(host, ignoreCase = true))
+        } ?: "Подписка"
+    }
+
+    /** Provider navigation is separate from the private subscription/config address. */
+    fun informationUrl(source: SubscriptionSource): String? {
+        val metadata = SubscriptionMetadataCodec.decode(source.metadata)
+        return sequenceOf(metadata.profileWebPageUrl, metadata.preferredExternalUrl()).mapNotNull { candidate ->
+            candidate?.trim()?.takeIf { value ->
+                runCatching {
+                    val uri = URI(value)
+                    (uri.scheme.equals("https", ignoreCase = true) || uri.scheme.equals("http", ignoreCase = true)) &&
+                        !uri.host.isNullOrBlank() && uri.rawUserInfo == null && (uri.port == -1 || uri.port in 1..65535)
+                }.getOrDefault(false)
+            }
+        }.firstOrNull()
     }
 
     /** Keep only the existing public announcement, never a raw metadata/config fallback. */

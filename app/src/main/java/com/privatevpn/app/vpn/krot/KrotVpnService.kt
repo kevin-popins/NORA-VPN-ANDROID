@@ -25,6 +25,7 @@ import com.privatevpn.app.vpn.AppTrafficMode
 import com.privatevpn.app.vpn.VpnConnectionStatus
 import com.privatevpn.app.vpn.VpnQuickSettingsTileService
 import com.privatevpn.app.vpn.VpnRuntimeStateStore
+import com.privatevpn.app.vpn.SplitTunnelGuardFactory
 import com.privatevpn.app.vpn.VpnSessionHistoryStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -184,6 +185,10 @@ class KrotVpnService : VpnService() {
                 )
                 appendRuntimeLog("KRot DNS: ${dnsServers.joinToString()}")
 
+                val packetPolicy = SplitTunnelGuardFactory.create(
+                    this@KrotVpnService, privateSessionPolicy.enabled,
+                    privateSessionPolicy.trustedPackages, dnsServers
+                )
                 val openedSession = KrotTunnelSession(
                     spec = spec,
                     establishTunInterface = {
@@ -196,6 +201,7 @@ class KrotVpnService : VpnService() {
                     protectSocket = { socket -> protect(socket) },
                     isNetworkAvailable = { networkAvailable.get() },
                     log = ::appendRuntimeLog,
+                    packetPolicy = packetPolicy,
                     onFailure = { error ->
                         failWithError(
                             AppErrors.krotRuntimeStartFailed(
@@ -386,6 +392,8 @@ class KrotVpnService : VpnService() {
     }
 
     private fun failWithError(appError: AppError, runtimeToken: String? = activeRuntimeToken) {
+        if (runtimeToken != null &&
+            (runtimeToken != activeRuntimeToken || !VpnRuntimeStateStore.isRuntimeOwner(runtimeToken))) return
         if (handlingFailure) return
         handlingFailure = true
 

@@ -1,6 +1,12 @@
 package com.privatevpn.app.ui.screens
 
+import android.content.ActivityNotFoundException
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.Intent
 import androidx.activity.ComponentActivity
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
@@ -38,8 +44,9 @@ class TechnicalProfileRowsUiTest {
         childProfileIds = profiles.map { it.id }, lastSelectedProfileId = "synthetic-real",
         syncStatus = SubscriptionSyncStatus.SUCCESS, createdAtMs = 1, updatedAtMs = 1
     )
-    private fun servers(profiles: List<VpnProfile>, sources: List<SubscriptionSource>, onSelect: (String) -> Unit = {}, activeId: String? = "synthetic-real") {
+    private fun servers(profiles: List<VpnProfile>, sources: List<SubscriptionSource>, onSelect: (String) -> Unit = {}, activeId: String? = "synthetic-real", externalContext: Context? = null) {
         rule.setContent { PrivateVpnTheme {
+            CompositionLocalProvider(LocalContext provides (externalContext ?: LocalContext.current)) {
             ProfilesScreen(profiles = profiles, subscriptions = sources, refreshingSubscriptionIds = emptySet(),
                 activeProfileId = activeId, serverPingResults = emptyMap(), pingInProgress = false,
                 errorMessage = null, scrollToTopSignal = 0, focusActiveSignal = 0,
@@ -51,6 +58,7 @@ class TechnicalProfileRowsUiTest {
                 onSetSubscriptionAutoUpdate = { _, _ -> }, onSetSubscriptionInterval = { _, _ -> },
                 onSetSubscriptionEnabled = { _, _ -> }, onSetActiveProfile = onSelect,
                 onDeleteProfile = {}, onRenameProfile = { _, _ -> }, onClearError = {}, onTransientMessage = {})
+            }
         } }
     }
 
@@ -138,5 +146,63 @@ class TechnicalProfileRowsUiTest {
                 clientPolicy = SubscriptionClientPolicy(`protected` = true, publicLabel = "NORA private"))))
         servers(listOf(real), listOf(source))
         rule.onNodeWithText(unsafe).assertDoesNotExist()
+    }
+
+    @Test fun protectedFriendlyTitleAndInformationKeepProviderConnectNavigation() {
+        val real = profile()
+        val connect = "https://connect.example.invalid/sub/synthetic?view=connect"
+        val friendlyTitle = "NORA friendly subscription"
+        val source = source(listOf(real)).copy(displayName = "https://example.invalid/test", metadata = SubscriptionMetadataCodec.encode(
+            SubscriptionMetadataPayload(displayTitle = friendlyTitle, profileWebPageUrl = connect,
+                providerSite = "https://provider.example.invalid", userId = "SYNTHETIC_PRIVATE_ID",
+                clientPolicy = SubscriptionClientPolicy(`protected` = true, publicLabel = "Custom address label"))))
+        val opened = mutableListOf<Intent>()
+        val context = object : ContextWrapper(rule.activity) {
+            override fun startActivity(intent: Intent) { opened += intent }
+        }
+        val presented = SubscriptionPresentation.apply(real, listOf(source))
+        servers(listOf(presented), listOf(source), externalContext = context)
+        rule.onNodeWithText(friendlyTitle).performScrollTo().assertExists()
+        rule.onNodeWithText(real.displayName).performScrollTo().assertExists()
+        rule.onNodeWithText("Custom address label").assertDoesNotExist()
+        rule.onNodeWithText("SYNTHETIC_PRIVATE_ID", substring = true).assertDoesNotExist()
+        rule.onNodeWithText(source.sourceUrl, substring = true).assertDoesNotExist()
+        rule.onNodeWithContentDescription("Дополнительные действия").performScrollTo().performClick()
+        rule.onNodeWithText("Открыть сайт").assertExists()
+        rule.onNodeWithText("Информация").performClick()
+        rule.runOnIdle {
+            assertEquals(1, opened.size)
+            assertEquals(Intent.ACTION_VIEW, opened.single().action)
+            assertEquals(connect, opened.single().dataString)
+        }
+        rule.onNodeWithText("Провайдер защитил адреса этой подписки.", substring = true).assertDoesNotExist()
+    }
+
+    @Test fun protectedInformationWithoutProviderUrlKeepsSafeLocalDetails() {
+        val real = profile()
+        val source = source(listOf(real))
+        servers(listOf(SubscriptionPresentation.apply(real, listOf(source))), listOf(source))
+        rule.onNodeWithContentDescription("Дополнительные действия").performScrollTo().performClick()
+        rule.onNodeWithText("Открыть сайт").assertDoesNotExist()
+        rule.onNodeWithText("Информация").performClick()
+        rule.onNodeWithText("NORA private").assertExists()
+        rule.onNodeWithText(source.sourceUrl, substring = true).assertDoesNotExist()
+        rule.onNodeWithText("Провайдер защитил адреса этой подписки.", substring = true).assertExists()
+    }
+
+    @Test fun protectedInformationFailedExternalActivityFallsBackWithoutShowingSourceMaterial() {
+        val real = profile()
+        val source = source(listOf(real)).copy(metadata = SubscriptionMetadataCodec.encode(SubscriptionMetadataPayload(
+            profileWebPageUrl = "https://connect.example.invalid/sub/synthetic",
+            clientPolicy = SubscriptionClientPolicy(`protected` = true, publicLabel = "NORA private"))))
+        val context = object : ContextWrapper(rule.activity) {
+            override fun startActivity(intent: Intent) { throw ActivityNotFoundException("Synthetic unavailable browser") }
+        }
+        servers(listOf(SubscriptionPresentation.apply(real, listOf(source))), listOf(source), externalContext = context)
+        rule.onNodeWithContentDescription("Дополнительные действия").performScrollTo().performClick()
+        rule.onNodeWithText("Информация").performClick()
+        rule.onNodeWithText("NORA private").assertExists()
+        rule.onNodeWithText(source.sourceUrl, substring = true).assertDoesNotExist()
+        rule.onNodeWithText("Провайдер защитил адреса этой подписки.", substring = true).assertExists()
     }
 }
